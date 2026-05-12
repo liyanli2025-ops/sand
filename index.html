@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>聚不起的沙 · 伊朗·100天</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&family=Noto+Serif+SC:wght@300;400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body class="map-mode">
+
+<div class="archive" id="mapArchive">
+  <div class="tag">
+    OPERATION · <b>IRAN</b><br>
+    DAY 100 · FIELD MAP<br>
+    2026.03.20 — 06.28
+  </div>
+  <div class="right tag">
+    <em>THE SAND THAT</em><br>
+    <em>CANNOT BE GATHERED</em><br>
+    ایران
+  </div>
+</div>
+
+<div class="scene-archive" id="sceneArchive">
+  <div class="tag" id="sceneArchiveL">FIELD · <b>—</b><br>—<br>DAY <b>000</b> / 100</div>
+  <div class="right tag" id="sceneArchiveR"><em>—</em><br>—<br>—</div>
+</div>
+
+<div class="back-btn" id="backBtn" title="return to map">
+  <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+</div>
+
+<div class="light-shaft"></div>
+<div class="scene-bg"></div>
+<div class="scene-ground"></div>
+<canvas id="stage"></canvas>
+
+<div class="heartbeat" aria-hidden="true">
+  <svg viewBox="0 0 14 22">
+    <path d="M2,1 L12,1 L12,4 L8,10 L12,16 L12,21 L2,21 L2,16 L6,10 L2,4 Z" fill="none" stroke="#d4a574" stroke-width="0.6"/>
+    <circle class="sand" cx="7" cy="6" r="0.6" fill="#d4a574"/>
+  </svg>
+</div>
+
+<!-- 星图 UI -->
+<div class="map-ui">
+  <div class="map-title">
+    <div class="zh">聚 不 起 的 沙</div>
+    <div class="sub">iran · 100 days of dust · field atlas</div>
+  </div>
+  <div class="map-hint" id="mapHint">探索下一个 · tehran</div>
+  <div class="map-controls" id="mapControls">
+    drag · look around <span class="sep">|</span> w a s d · move <span class="sep">|</span> scroll · forward
+  </div>
+</div>
+
+<!-- 屏幕中央准星（AR 风格） -->
+<div class="reticle" id="reticle">
+  <svg viewBox="0 0 40 40">
+    <circle cx="20" cy="20" r="12" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.4"/>
+    <circle cx="20" cy="20" r="1.5" fill="currentColor"/>
+  </svg>
+</div>
+
+<!-- 坐标标签（JS 动态定位） -->
+<div class="coord-labels" id="coordLabels"></div>
+
+<!-- 长按提示 -->
+<div class="press-hint" id="pressHint">
+  press &amp; hold <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+</div>
+
+<!-- 微型沙盘（右上角） -->
+<div class="mini-sandbox" id="miniSandbox">
+  <canvas id="miniSandboxCanvas" width="140" height="140"></canvas>
+  <div class="mini-sandbox-label">FIELD MAP</div>
+</div>
+
+<!-- 故事弹窗卡片 -->
+<div class="story-card" id="story">
+  <div class="story-card-inner"></div>
+</div>
+
+<!-- 占位（未完成场景） -->
+<div class="placeholder" id="placeholder">
+  <div class="title" id="phTitle">— — —</div>
+  <div class="en" id="phEn">coming soon</div>
+  <div class="note">
+    此坐标的场景正在筹备<br>
+    <span class="accent">← 返回星图继续探索</span>
+  </div>
+</div>
+
+<div class="press-bar"><div class="fill" id="pressFill"></div></div>
+
+<div class="next-hint" id="nextHint">return to map <span class="arrow">↵</span></div>
+
+<!-- iOS 陀螺仪授权 -->
+<div class="gyro-ask" id="gyroAsk">
+  <div class="text">
+    允许使用设备方向感应<br>
+    以便在场景中左右转动探索
+  </div>
+  <button id="gyroAllowBtn">ALLOW</button>
+  <button id="gyroDenyBtn" class="skip">SKIP</button>
+</div>
+
+<!-- 模型加载状态指示（仅场景模式可见） -->
+<div class="model-loading" id="modelLoading">
+  <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+  <div class="text">FORGING THE INSTRUMENT</div>
+</div>
+
+<script src="./three.min.js"></script>
+<script src="./GLTFLoader.js"></script>
+<script src="./MeshSurfaceSampler.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>

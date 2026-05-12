@@ -1,0 +1,540 @@
+:root{
+  --bg-0:#05070d;
+  --ink:#e8d9b8;
+  --ink-dim:#7a6a4c;
+  --gold:#d4a574;
+  --gold-hot:#f0c98a;
+  --line:rgba(212,165,116,0.15);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{
+  width:100%;height:100%;overflow:hidden;
+  background:#03050a;
+  color:var(--ink);
+  font-family:'Noto Serif SC',serif;
+  user-select:none;-webkit-user-select:none;
+  touch-action:none;
+}
+body{
+  position:fixed;inset:0;
+  background:radial-gradient(ellipse at 50% 45%, #0a1020 0%, #03050a 70%);
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:10;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.83  0 0 0 0 0.65  0 0 0 0 0.45  0 0 0 0.06 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  opacity:.45;mix-blend-mode:overlay;
+}
+
+/* 体积光（仅场景模式） */
+body.scene-mode::after{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:8;
+  background:
+    radial-gradient(ellipse 55% 70% at 78% 8%, rgba(255,220,170,0.22) 0%, rgba(255,210,150,0.08) 28%, transparent 60%),
+    radial-gradient(ellipse 120% 90% at 82% 0%, rgba(240,200,140,0.12) 0%, transparent 45%),
+    radial-gradient(ellipse 80% 100% at 20% 95%, rgba(0,0,0,0.5) 0%, transparent 55%);
+  mix-blend-mode:screen;
+  opacity:0;
+  animation:lightIn 1.5s ease forwards;
+}
+@keyframes lightIn{to{opacity:1;}}
+
+.light-shaft{
+  position:fixed;inset:0;pointer-events:none;z-index:7;
+  overflow:hidden;
+  opacity:0;transition:opacity 1.5s ease;
+}
+body.scene-mode .light-shaft{opacity:1;}
+.light-shaft::before{
+  content:"";position:absolute;
+  top:-30%;right:-10%;
+  width:80%;height:160%;
+  background:linear-gradient(200deg, rgba(255,225,180,0.10) 0%, rgba(240,200,140,0.05) 25%, transparent 55%);
+  transform:rotate(12deg);
+  filter:blur(40px);
+  mix-blend-mode:screen;
+  animation:shaftBreathe 8s ease-in-out infinite;
+}
+.light-shaft::after{
+  content:"";position:absolute;
+  top:-10%;right:5%;
+  width:3px;height:140%;
+  background:linear-gradient(to bottom, rgba(255,230,190,0.35) 0%, rgba(255,220,170,0.15) 30%, transparent 70%);
+  transform:rotate(15deg);
+  transform-origin:top right;
+  filter:blur(8px);
+  mix-blend-mode:screen;
+}
+@keyframes shaftBreathe{0%,100%{opacity:.85;}50%{opacity:1;}}
+
+#stage{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;z-index:5;}
+
+/* ———— 档案栏 ———— */
+.archive, .scene-archive{
+  position:fixed;top:0;left:0;right:0;z-index:20;
+  padding:18px 22px 0;
+  display:flex;justify-content:space-between;align-items:flex-start;
+  font-family:'Cormorant Garamond',serif;
+  pointer-events:none;
+  transition:opacity .8s ease;
+}
+.scene-archive{display:none;opacity:0;transition:opacity 1s ease .4s;}
+body.scene-mode .scene-archive{display:flex;opacity:1;}
+body.scene-mode .scene-archive .right{max-width:calc(100% - 170px);}
+body.scene-mode .archive{display:none;}
+.archive .tag, .scene-archive .tag{
+  font-size:10px;letter-spacing:.32em;color:var(--ink-dim);
+  text-transform:uppercase;line-height:1.8;
+}
+.archive .tag b, .scene-archive .tag b{color:var(--gold);font-weight:400;}
+.archive .right, .scene-archive .right{text-align:right;font-style:italic;}
+.archive .right em, .scene-archive .right em{color:var(--gold);font-style:normal;font-size:11px;letter-spacing:.15em;}
+
+/* 返回按钮 */
+.back-btn{
+  position:fixed;top:18px;left:18px;z-index:22;
+  width:34px;height:34px;
+  border:1px solid var(--line);
+  border-radius:50%;
+  display:none;align-items:center;justify-content:center;
+  cursor:pointer;
+  background:rgba(10,15,30,0.5);
+  backdrop-filter:blur(6px);
+  -webkit-backdrop-filter:blur(6px);
+  opacity:0;transition:opacity .5s ease 1s, border-color .3s;
+  pointer-events:auto;
+}
+body.scene-mode .back-btn{display:flex;opacity:.7;}
+.back-btn:hover{opacity:1;border-color:var(--gold);}
+.back-btn svg{width:14px;height:14px;fill:none;stroke:var(--gold);stroke-width:1.5;}
+
+/* 沙漏心跳 */
+.heartbeat{
+  position:fixed;bottom:18px;right:20px;z-index:20;
+  width:14px;height:22px;opacity:.45;pointer-events:none;
+}
+.heartbeat svg{width:100%;height:100%;}
+.heartbeat .sand{animation:drip 2.4s linear infinite;}
+@keyframes drip{0%{transform:translateY(0);opacity:1;}100%{transform:translateY(10px);opacity:0;}}
+
+/* ———— 星图 UI ———— */
+.map-ui{
+  position:fixed;inset:0;z-index:15;
+  pointer-events:none;
+  opacity:0;
+  transition:opacity 1s ease;
+}
+body.map-mode .map-ui{opacity:1;}
+.map-title{
+  position:absolute;top:54px;left:0;right:0;
+  text-align:center;
+  font-family:'Cormorant Garamond',serif;
+}
+.map-title .zh{
+  font-family:'Noto Serif SC',serif;
+  font-size:19px;letter-spacing:.55em;
+  color:var(--ink);font-weight:300;
+  margin-bottom:10px;
+}
+.map-title .sub{
+  font-size:10px;letter-spacing:.45em;
+  color:var(--ink-dim);text-transform:uppercase;
+  font-style:italic;
+}
+.map-hint{
+  position:absolute;bottom:80px;left:0;right:0;
+  text-align:center;
+  font-family:'Cormorant Garamond',serif;
+  font-size:11px;letter-spacing:.35em;
+  color:var(--gold);text-transform:uppercase;
+  opacity:.75;
+  animation:hintPulse 2.8s ease-in-out infinite;
+}
+.map-controls{
+  position:absolute;bottom:30px;left:0;right:0;
+  text-align:center;
+  font-family:'Cormorant Garamond',serif;
+  font-size:9.5px;letter-spacing:.3em;
+  color:var(--ink-dim);text-transform:uppercase;
+  opacity:.55;
+  pointer-events:none;
+}
+.map-controls .sep{margin:0 10px;opacity:.4;}
+
+/* 屏幕中央准星（AR 十字） */
+.reticle{
+  position:fixed;top:50%;left:50%;z-index:13;
+  width:40px;height:40px;
+  transform:translate(-50%,-50%);
+  color:var(--gold);
+  pointer-events:none;
+  opacity:0;
+  transition:opacity .8s ease, color .4s ease, transform .4s ease;
+}
+body.map-mode .reticle{opacity:.5;}
+.reticle.aimed{
+  opacity:1;
+  color:var(--gold-hot);
+  transform:translate(-50%,-50%) scale(1.3);
+}
+.reticle svg{width:100%;height:100%;display:block;}
+@keyframes hintPulse{0%,100%{opacity:.4;}50%{opacity:.85;}}
+
+/* 坐标标签 */
+.coord-labels{
+  position:fixed;inset:0;z-index:14;
+  pointer-events:none;
+  opacity:0;transition:opacity 1s ease;
+}
+body.map-mode .coord-labels{opacity:1;}
+.coord-label{
+  position:absolute;
+  transform:translate(-50%, -50%);
+  font-family:'Cormorant Garamond',serif;
+  white-space:nowrap;
+  cursor:pointer;
+  pointer-events:auto;
+  padding:12px 18px;  /* 增大点击热区 */
+}
+.coord-label .dot{
+  width:9px;height:9px;border-radius:50%;
+  background:var(--gold);
+  box-shadow:0 0 12px var(--gold-hot), 0 0 24px rgba(240,201,138,0.4);
+  margin:0 auto 8px;
+  animation:dotPulse 2s ease-in-out infinite;
+}
+.coord-label.locked{cursor:not-allowed;}
+.coord-label.locked .dot{
+  background:var(--ink-dim);
+  box-shadow:none;
+  animation:none;
+  opacity:.25;
+}
+.coord-label.done .dot{
+  background:transparent;
+  border:1px solid var(--ink-dim);
+  box-shadow:none;
+  animation:none;
+  opacity:.55;
+  width:8px;height:8px;
+}
+@keyframes dotPulse{
+  0%,100%{transform:scale(1);box-shadow:0 0 10px var(--gold-hot), 0 0 20px rgba(240,201,138,0.3);}
+  50%{transform:scale(1.35);box-shadow:0 0 18px var(--gold-hot), 0 0 40px rgba(240,201,138,0.6);}
+}
+.coord-label .name{
+  font-size:11px;letter-spacing:.25em;
+  color:var(--gold);text-transform:uppercase;
+  text-align:center;font-weight:400;
+}
+.coord-label.locked .name{color:var(--ink-dim);opacity:.4;}
+.coord-label.done .name{color:var(--ink-dim);}
+.coord-label .day{
+  font-size:9px;letter-spacing:.3em;
+  color:var(--ink-dim);
+  margin-top:3px;text-align:center;font-style:italic;
+}
+/* 当前可点击坐标的额外提示（active 状态） */
+.coord-label.active{
+  animation:activeGlow 2s ease-in-out infinite;
+}
+.coord-label.active::before{
+  content:"TAP TO ARRIVE";
+  position:absolute;top:-14px;left:50%;transform:translateX(-50%);
+  font-size:8px;letter-spacing:.4em;
+  color:var(--gold-hot);
+  white-space:nowrap;
+  opacity:.9;
+  animation:tapHint 1.8s ease-in-out infinite;
+}
+.coord-label.active::after{
+  content:"";
+  position:absolute;left:50%;bottom:-6px;
+  transform:translateX(-50%);
+  width:24px;height:1px;
+  background:linear-gradient(90deg, transparent, var(--gold), transparent);
+}
+@keyframes tapHint{
+  0%,100%{opacity:.4;transform:translate(-50%,0);}
+  50%{opacity:1;transform:translate(-50%,-3px);}
+}
+@keyframes activeGlow{
+  0%,100%{filter:drop-shadow(0 0 4px rgba(240,201,138,0.4));}
+  50%{filter:drop-shadow(0 0 12px rgba(240,201,138,0.9));}
+}
+
+/* 长按提示 */
+.press-hint{
+  position:fixed;left:50%;bottom:100px;z-index:15;
+  transform:translateX(-50%);pointer-events:none;
+  font-family:'Cormorant Garamond',serif;
+  color:var(--ink-dim);
+  font-size:11px;letter-spacing:.35em;text-transform:uppercase;
+  opacity:0;transition:opacity .8s ease;
+  text-align:center;
+}
+.press-hint.show{opacity:.7;}
+.press-hint .dot{
+  display:inline-block;width:3px;height:3px;border-radius:50%;
+  background:var(--gold);margin:0 3px;vertical-align:middle;
+  animation:pulse 1.6s ease-in-out infinite;
+}
+.press-hint .dot:nth-child(2){animation-delay:.2s;}
+.press-hint .dot:nth-child(3){animation-delay:.4s;}
+@keyframes pulse{0%,100%{opacity:.2;transform:scale(1);}50%{opacity:1;transform:scale(1.5);}}
+
+/* 故事弹窗卡片 */
+.story-card{
+  position:fixed;right:24px;top:50%;z-index:18;
+  transform:translateY(-50%);
+  width:clamp(220px, 32vw, 300px);
+  pointer-events:none;
+  opacity:0;transform:translateY(-50%) translateX(20px);
+  transition:opacity 2s ease, transform 2.5s ease;
+}
+.story-card.show{opacity:1;transform:translateY(-50%) translateX(0);}
+.story-card-inner{
+  background:rgba(18,14,10,0.88);
+  border:1px solid rgba(212,165,116,0.18);
+  border-radius:6px;
+  padding:22px 20px;
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  box-shadow:0 8px 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(212,165,116,0.08);
+}
+.story-card .card-title{
+  font-family:'Noto Serif SC',serif;
+  font-size:15px;letter-spacing:.2em;
+  color:var(--ink);font-weight:400;
+  margin-bottom:6px;
+  opacity:0;transform:translateY(8px);
+  transition:opacity 1s ease, transform 1s ease;
+}
+.story-card.show .card-title{opacity:1;transform:translateY(0);transition-delay:0.3s;}
+.story-card .card-subtitle{
+  font-family:'Cormorant Garamond',serif;
+  font-size:10px;letter-spacing:.35em;color:var(--gold);
+  text-transform:uppercase;
+  margin-bottom:14px;padding-bottom:12px;
+  border-bottom:1px solid var(--line);
+  opacity:0;transform:translateY(8px);
+  transition:opacity 1s ease, transform 1s ease;
+}
+.story-card.show .card-subtitle{opacity:1;transform:translateY(0);transition-delay:0.5s;}
+.story-card .card-subtitle em{color:var(--ink-dim);font-style:normal;margin-left:6px;}
+.story-card p{
+  font-size:12.5px;line-height:2;color:var(--ink);
+  font-weight:300;margin-bottom:3px;
+  opacity:0;transform:translateY(10px);
+  transition:opacity 1.4s ease, transform 1.4s ease;
+}
+.story-card.show p{opacity:.9;transform:translateY(0);}
+.story-card.show p:nth-child(3){transition-delay:.7s;}
+.story-card.show p:nth-child(4){transition-delay:1.2s;}
+.story-card.show p:nth-child(5){transition-delay:1.7s;}
+.story-card.show p:nth-child(6){transition-delay:2.2s;}
+.story-card.show p:nth-child(7){transition-delay:2.6s;}
+.story-card p.quiet{color:var(--ink-dim);font-style:italic;font-size:11.5px;}
+.story-card .card-icon{
+  text-align:center;margin-top:14px;
+  opacity:0;transition:opacity 1.2s ease 2.8s;
+}
+.story-card.show .card-icon{opacity:.6;}
+.story-card .card-icon svg{width:18px;height:18px;stroke:var(--gold);fill:none;stroke-width:1;}
+
+/* 场景背景（真实图片 + 叠加层） */
+.scene-bg{
+  position:fixed;inset:0;z-index:1;
+  pointer-events:none;
+  opacity:0;transition:opacity 1.5s ease;
+}
+body.scene-mode .scene-bg{opacity:1;}
+.scene-bg::before{
+  content:"";position:absolute;inset:0;
+  background:url('./scene-bg.png') center center / cover no-repeat;
+  opacity:0.55;
+}
+.scene-bg::after{
+  content:"";position:absolute;inset:0;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 50%, transparent 20%, rgba(3,5,10,0.7) 80%),
+    linear-gradient(to bottom, rgba(3,5,10,0.3) 0%, rgba(3,5,10,0.6) 60%, rgba(15,12,8,0.85) 100%);
+}
+
+/* 地面废墟剪影（场景底部） */
+.scene-ground{
+  position:fixed;bottom:0;left:0;right:0;z-index:2;
+  height:18vh;pointer-events:none;
+  opacity:0;transition:opacity 2s ease 0.5s;
+}
+body.scene-mode .scene-ground{opacity:1;}
+.scene-ground::before{
+  content:"";position:absolute;inset:0;
+  background:
+    linear-gradient(to top, rgba(15,12,8,0.95) 0%, rgba(15,12,8,0.5) 40%, transparent 100%);
+}
+.scene-ground::after{
+  content:"";position:absolute;bottom:0;left:0;right:0;height:60%;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 80' preserveAspectRatio='none'><path d='M0,80 L0,55 Q20,48 40,52 Q80,60 120,50 Q160,42 200,48 Q250,55 300,45 Q340,38 380,42 Q420,48 460,40 Q500,34 540,38 Q580,44 620,36 Q660,30 700,35 Q740,40 780,32 L800,30 L800,80 Z' fill='rgba(25,20,12,0.9)'/><path d='M0,80 L0,65 Q50,58 100,62 Q150,68 200,60 Q260,54 320,58 Q380,64 440,56 Q500,50 560,54 Q620,60 680,52 Q740,46 800,50 L800,80 Z' fill='rgba(35,28,18,0.7)'/></svg>");
+  background-size:100% 100%;
+  background-repeat:no-repeat;
+}
+
+/* 微型沙盘（右上角） */
+.mini-sandbox{
+  position:fixed;top:56px;right:18px;z-index:22;
+  width:140px;height:140px;
+  border:1px solid rgba(212,165,116,0.2);
+  border-radius:4px;
+  background:rgba(10,8,5,0.85);
+  backdrop-filter:blur(8px);
+  -webkit-backdrop-filter:blur(8px);
+  box-shadow:0 4px 20px rgba(0,0,0,0.5);
+  display:none;
+  opacity:0;
+  transition:opacity 1s ease 0.6s;
+  overflow:hidden;
+}
+body.scene-mode .mini-sandbox{display:block;opacity:1;}
+.mini-sandbox canvas{
+  display:block;width:100%;height:100%;
+}
+.mini-sandbox-label{
+  position:absolute;bottom:4px;left:0;right:0;
+  text-align:center;
+  font-family:'Cormorant Garamond',serif;
+  font-size:8px;letter-spacing:.4em;
+  color:var(--ink-dim);text-transform:uppercase;
+  opacity:.6;
+}
+
+.press-bar{
+  position:fixed;left:50%;bottom:40px;z-index:19;
+  transform:translateX(-50%);
+  width:80px;height:1px;
+  background:rgba(212,165,116,0.15);overflow:hidden;
+  opacity:0;transition:opacity .5s ease;
+}
+body.scene-mode .press-bar{opacity:1;}
+.press-bar .fill{
+  position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,var(--gold),transparent);
+  transform:translateX(-100%);
+}
+
+/* 下一站 / 返回 提示 */
+.next-hint{
+  position:fixed;bottom:30px;right:24px;z-index:21;
+  font-family:'Cormorant Garamond',serif;
+  font-size:10px;letter-spacing:.32em;
+  color:var(--gold);text-transform:uppercase;
+  opacity:0;transition:opacity 1s ease;
+  cursor:pointer;pointer-events:auto;
+  padding:6px 0;
+  display:none;
+}
+.next-hint.show{display:block;opacity:.75;}
+.next-hint:hover{opacity:1;}
+.next-hint .arrow{display:inline-block;margin-left:8px;transition:transform .3s;}
+.next-hint:hover .arrow{transform:translateX(4px);}
+
+/* 占位场景 */
+.placeholder{
+  position:fixed;top:50%;left:50%;z-index:16;
+  transform:translate(-50%,-50%);
+  text-align:center;
+  font-family:'Cormorant Garamond',serif;
+  color:var(--ink-dim);
+  pointer-events:none;
+  opacity:0;transition:opacity 1.5s ease 1s;
+  display:none;
+  max-width:80%;
+}
+.placeholder.show{display:block;opacity:1;}
+.placeholder .title{
+  font-family:'Noto Serif SC',serif;
+  font-size:22px;letter-spacing:.4em;
+  color:var(--ink);font-weight:300;
+  margin-bottom:16px;
+}
+.placeholder .en{font-size:10px;letter-spacing:.4em;color:var(--gold);margin-bottom:32px;text-transform:uppercase;}
+.placeholder .note{font-size:11px;letter-spacing:.2em;line-height:2;opacity:.7;}
+.placeholder .accent{color:var(--gold);}
+
+/* 模型加载状态指示（场景模式 + 模型未就绪时显示） */
+.model-loading{
+  position:fixed;left:50%;top:50%;z-index:17;
+  transform:translate(-50%,-50%);
+  display:none;
+  font-family:'Cormorant Garamond',serif;
+  font-size:10px;letter-spacing:.5em;
+  color:var(--gold);
+  text-align:center;
+  pointer-events:none;
+  opacity:0;transition:opacity .6s ease;
+}
+.model-loading.show{display:block;opacity:.7;}
+.model-loading .text{margin-top:14px;}
+.model-loading .dot{
+  display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:var(--gold);margin:0 4px;
+  animation:loadingDot 1.4s ease-in-out infinite;
+}
+.model-loading .dot:nth-child(2){animation-delay:.2s;}
+.model-loading .dot:nth-child(3){animation-delay:.4s;}
+@keyframes loadingDot{0%,80%,100%{opacity:.3;transform:scale(.7);}40%{opacity:1;transform:scale(1.1);}}
+
+/* iOS 陀螺仪授权 */
+.gyro-ask{
+  position:fixed;inset:0;z-index:999;
+  background:rgba(5,7,13,0.95);
+  display:none;align-items:center;justify-content:center;
+  flex-direction:column;
+  padding:30px;
+  pointer-events:auto;
+}
+.gyro-ask.show{display:flex;}
+.gyro-ask .text{
+  font-family:'Noto Serif SC',serif;
+  color:var(--ink);font-size:14px;line-height:2;letter-spacing:.1em;
+  text-align:center;margin-bottom:30px;max-width:280px;
+}
+.gyro-ask button{
+  background:transparent;
+  border:1px solid var(--gold);
+  color:var(--gold);
+  padding:12px 36px;
+  font-family:'Cormorant Garamond',serif;
+  font-size:13px;letter-spacing:.3em;text-transform:uppercase;
+  cursor:pointer;
+  margin:6px;
+}
+.gyro-ask button.skip{
+  border-color:var(--ink-dim);
+  color:var(--ink-dim);
+  font-size:11px;padding:8px 24px;
+  margin-top:10px;
+}
+
+/* 移动端适配 */
+@media (max-width:640px){
+  .story-card{
+    position:fixed;right:10px;left:10px;top:auto;bottom:20px;
+    width:auto;
+    transform:translateY(20px);
+  }
+  .story-card.show{transform:translateY(0);}
+  .story-card-inner{
+    padding:14px 14px 12px;
+    max-height:34vh;
+    overflow-y:auto;
+  }
+  .story-card .card-title{font-size:14px;}
+  .story-card p{font-size:11.5px;line-height:1.85;}
+  .story-card p.quiet{font-size:10.5px;}
+  .story-card .card-icon{margin-top:8px;}
+  .mini-sandbox{
+    top:50px;right:12px;
+    width:100px;height:100px;
+  }
+  .mini-sandbox canvas{width:100px;height:100px;}
+}
