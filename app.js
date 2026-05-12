@@ -339,17 +339,19 @@ camera.position.set(MAP_CAM_DEFAULT.x, MAP_CAM_DEFAULT.y, MAP_CAM_DEFAULT.z);
 camera.lookAt(0, 0, 0);
 
 /* ---------- 贴图 ---------- */
+/* ---------- 贴图（沙粒：暗中心 + 软边，不再是发光圆点） ---------- */
 function makeSpriteTexture(){
   const size = 128;
   const c = document.createElement('canvas');
   c.width = c.height = size;
   const g = c.getContext('2d');
+  // 软圆 alpha 蒙版（白色 = 用本色，alpha 衰减到边缘）
+  // 这样片段着色器里 col = vColor * lighting * tc.a，能保留暗面
   const grd = g.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-  // 更柔和的中心：避免密集粒子叠加成白色，让法线明暗对比保留
-  grd.addColorStop(0.0, 'rgba(255,250,235,0.85)');
-  grd.addColorStop(0.18,'rgba(250,230,200,0.55)');
-  grd.addColorStop(0.45,'rgba(230,190,140,0.20)');
-  grd.addColorStop(1.0, 'rgba(220,180,130,0)');
+  grd.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+  grd.addColorStop(0.35,'rgba(255,255,255,0.85)');
+  grd.addColorStop(0.7, 'rgba(255,255,255,0.30)');
+  grd.addColorStop(1.0, 'rgba(255,255,255,0)');
   g.fillStyle = grd;
   g.fillRect(0,0,size,size);
   const tex = new THREE.CanvasTexture(c);
@@ -431,30 +433,37 @@ const seeds       = new Float32Array(COUNT);
 const roles       = new Float32Array(COUNT);
 const shatterLife = new Float32Array(COUNT);
 const scatteredPos= new Float32Array(COUNT * 3);
+const partNormals = new Float32Array(COUNT * 3); // 每颗粒子的真实表面法线（来自 GLB）
 
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 geometry.setAttribute('aSize',    new THREE.BufferAttribute(sizes, 1));
 geometry.setAttribute('aColor',   new THREE.BufferAttribute(colors, 3));
 geometry.setAttribute('aSeed',    new THREE.BufferAttribute(seeds, 1));
+geometry.setAttribute('aNormal',  new THREE.BufferAttribute(partNormals, 3));
 
-/* ---------- Shader ---------- */
+/* ---------- Shader（沙雕质感：真法线 + Lambert + 可切换 blending） ---------- */
 const particleMaterial = new THREE.ShaderMaterial({
   uniforms: {
     uTex:{value:spriteTex}, uPixelRatio:{value:renderer.getPixelRatio()},
     uTime:{value:0}, uSizeMul:{value:1.0}, uBrightness:{value:1.0},
-    uLightDir:{value:new THREE.Vector3(0.55,0.75,0.35).normalize()},
-    uLightColor:{value:new THREE.Color(1.0,0.85,0.62)},
-    uAmbient:{value:0.22},
-    uLightMix:{value:0.0},
-    uWobble:{value:1.0},   // 抖动强度（成形态时降到极低以显细节）
+    // 强方向光：从左上 45° 打来（与参考图一致）
+    uLightDir:{value:new THREE.Vector3(-0.55, 0.78, 0.30).normalize()},
+    uLightColor:{value:new THREE.Color(1.0, 0.92, 0.78)}, // 暖白光
+    uShadowColor:{value:new THREE.Color(0.05, 0.04, 0.03)}, // 暗面接近黑
+    uAmbient:{value:0.08},   // 环境光极弱（让背光面真黑）
+    uLightMix:{value:0.0},   // 0=地图均匀光、1=场景方向光（沙雕态）
+    uWobble:{value:1.0},
+    uSculpt:{value:0.0},     // 0=粒子飘动态、1=沙雕态（影响混合模式行为）
   },
   vertexShader: `
     attribute float aSize; attribute vec3 aColor; attribute float aSeed;
+    attribute vec3 aNormal;
     uniform float uPixelRatio, uTime, uSizeMul, uWobble;
     uniform vec3 uLightDir;
     varying vec3 vColor;
     varying float vLight;
+    varying float vNDotL;
     void main(){
       vColor = aColor;
       vec3 pos = position;
@@ -462,28 +471,50 @@ const particleMaterial = new THREE.ShaderMaterial({
       pos.x += sin(uTime*0.7 + aSeed*30.0) * wob;
       pos.y += cos(uTime*0.6 + aSeed*20.0) * wob * 0.7;
       pos.z += sin(uTime*0.8 + aSeed*40.0) * wob;
-      vec3 normal = normalize(pos - vec3(0.0, -10.0, 0.0));
-      vLight = dot(normal, uLightDir) * 0.5 + 0.5;
+      // —— 用真法线（aNormal）做 Lambert，比"位置-原点"准确百倍 ——
+      // 没有法线（length<0.01，比如氛围粒子）时降级用位置法线
+      vec3 nrm = aNormal;
+      if(length(nrm) < 0.1){
+        nrm = normalize(pos - vec3(0.0, -10.0, 0.0));
+      }
+      vNDotL = dot(normalize(nrm), normalize(uLightDir));
+      vLight = vNDotL * 0.5 + 0.5;
       vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
       gl_PointSize = aSize * uSizeMul * 140.0 / -mvPos.z * uPixelRatio;
       gl_Position = projectionMatrix * mvPos;
     }`,
   fragmentShader: `
     uniform sampler2D uTex;
-    uniform float uBrightness, uAmbient, uLightMix;
-    uniform vec3 uLightColor;
+    uniform float uBrightness, uAmbient, uLightMix, uSculpt;
+    uniform vec3 uLightColor, uShadowColor;
     varying vec3 vColor;
     varying float vLight;
+    varying float vNDotL;
     void main(){
       vec4 tc = texture2D(uTex, gl_PointCoord);
       if(tc.a < 0.01) discard;
-      float lit = mix(1.0, uAmbient + (1.0 - uAmbient) * vLight, uLightMix);
-      vec3 warmTint = mix(vColor, uLightColor * vColor * 1.8, smoothstep(0.3, 0.95, vLight) * uLightMix);
-      vec3 col = warmTint * lit * uBrightness;
-      col = mix(col, col * tc.rgb * 1.4, 0.55);
-      float rim = pow(smoothstep(0.7, 1.0, vLight), 2.0) * uLightMix;
-      col += uLightColor * rim * 0.45;
-      gl_FragColor = vec4(col, tc.a * 0.85);
+
+      // —— Lambert：背光面真的是黑（不是只是变暗） ——
+      // ndotl 范围 -1~+1：负值代表背光，钳到 0 = 完全黑
+      float lambert = max(vNDotL, 0.0);
+      // 用 smoothstep 让明暗过渡更"硬"（沙雕的强对比感）
+      float lit = smoothstep(0.0, 0.6, lambert);
+
+      // 沙雕态（uSculpt=1）：暗面 = 阴影色（极暗），亮面 = 暖光照射的本色
+      vec3 sandShadow = vColor * uShadowColor * 6.0; // 阴影区颜色（保留一点本色）
+      vec3 sandLit    = vColor * uLightColor * (uAmbient + lit * 1.3);
+      vec3 sculptCol  = mix(sandShadow, sandLit, lit);
+
+      // 地图态（uSculpt=0）：保留原来的亮粒子风格
+      vec3 mapCol = vColor * (0.5 + lit * 0.8) * uBrightness;
+      // 给地图态加一点暖光晕，保持原氛围
+      mapCol = mix(mapCol, mapCol * uLightColor * 1.2, lit * 0.4);
+
+      vec3 col = mix(mapCol, sculptCol, uSculpt);
+
+      // alpha：沙雕态满 alpha（实体感）；飘动态半透明（云雾感）
+      float alpha = mix(tc.a * 0.85, tc.a, uSculpt);
+      gl_FragColor = vec4(col * uBrightness, alpha);
     }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
 });
@@ -668,13 +699,15 @@ function buildKamanchehFromModel(){
     const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2];
     const yNorm = (points[i*3+1] - 0) / 65; // -1 ~ +1，按高度划分区域
 
+    // —— 把真实表面法线写入粒子 attribute（让 shader 做精确 Lambert 光照） ——
+    partNormals[i*3]   = nx;
+    partNormals[i*3+1] = ny;
+    partNormals[i*3+2] = nz;
+
     // —— 角色分配（沿用原叙事钩子：roles[i]=1~4 是四根弦） ——
-    // 简单按高度+水平位置划分粒子角色，让"四根弦从细到粗依次崩断"叙事仍可触发
-    // 真实模型里弦本身在中央细长区域，这里近似处理
     const r2 = points[i*3]*points[i*3] + points[i*3+2]*points[i*3+2];
     const isStringRegion = (yNorm > -0.1 && yNorm < 0.7 && r2 < 6);
     if(isStringRegion){
-      // 按 X 位置分配 4 根弦（细到粗）
       const sIdx = Math.max(0, Math.min(3, Math.floor((points[i*3] + 2) / 1)));
       roles[i] = sIdx + 1;
     } else if(yNorm > 0.7){
@@ -683,35 +716,28 @@ function buildKamanchehFromModel(){
       roles[i] = 0; // 琴体
     }
 
-    // —— 颜色 + 按区域分配粒子大小（琴箱/琴头大，琴颈小） ——
+    // —— 颜色：统一的米黄沙土底色（不在 CPU 端做光照，光照交给 shader） ——
+    // 参考：沙雕用湿沙，颜色范围 #b89968 ~ #d4b388
+    // 加入轻微的颗粒色彩抖动 + 高度色温变化（底部偏深，顶部偏亮）
     const isCoarseGrain = Math.random() < 0.18;
-    const heightShade = 0.55 + (yNorm + 1) * 0.18;
-    const grain = 0.85 + Math.random() * 0.18;
-
-    // 法线打光
-    const lx = 0.45, ly = 0.75, lz = 0.5;
-    const ndotl = nx * lx + ny * ly + nz * lz;
-    // 强化法线打光：迎光极亮、背光极暗，凸显雕塑感
-    const litness = 0.18 + Math.max(0, ndotl) * 1.2;
-
-    // 区域加权已在采样阶段做（琴箱/琴头加密），这里不再放大粒子
-    // 改为按粒子大致尺寸：粗砂 + 细沙混合，全部偏小（沙粒感）
+    const grainNoise = 0.88 + Math.random() * 0.20;       // 颗粒间微差异
+    const heightTint = 0.92 + (yNorm + 1) * 0.04;          // 越高越亮一点（被光照射更多）
 
     const isMetal = isStringRegion || roles[i] === 5;
     if(isMetal){
-      // 弦/琴轴/琴头：偏银白金，不刻意加亮，与琴体融为一体
-      const m = 0.88 * grain * (0.5 + litness * 0.6);
-      colors[i*3]   = m;
-      colors[i*3+1] = m * 0.95;
-      colors[i*3+2] = m * 0.85;
-      sizes[i] = isCoarseGrain ? 0.28 + Math.random() * 0.15 : 0.14 + Math.random() * 0.12;
+      // 弦/琴头：略浅一点的沙土色，融入整体
+      const base = grainNoise * heightTint;
+      colors[i*3]   = 0.86 * base;  // R
+      colors[i*3+1] = 0.74 * base;  // G
+      colors[i*3+2] = 0.55 * base;  // B
+      sizes[i] = isCoarseGrain ? 0.20 + Math.random() * 0.10 : 0.10 + Math.random() * 0.08;
     } else {
-      // 琴体：金沙色，按法线明暗对比
-      const c = heightShade * grain * litness;
-      colors[i*3]   = 0.92 * c;
-      colors[i*3+1] = 0.72 * c;
-      colors[i*3+2] = 0.42 * c;
-      sizes[i] = isCoarseGrain ? 0.40 + Math.random() * 0.22 : 0.18 + Math.random() * 0.20;
+      // 琴体：暖沙色（米黄 #c9a978 偏移）
+      const base = grainNoise * heightTint;
+      colors[i*3]   = 0.82 * base;  // R
+      colors[i*3+1] = 0.68 * base;  // G
+      colors[i*3+2] = 0.48 * base;  // B
+      sizes[i] = isCoarseGrain ? 0.28 + Math.random() * 0.16 : 0.13 + Math.random() * 0.14;
     }
   }
   // 兜底剩余粒子
@@ -719,10 +745,13 @@ function buildKamanchehFromModel(){
     targets[i*3] = (Math.random()-0.5)*30;
     targets[i*3+1] = (Math.random()-0.5)*60;
     targets[i*3+2] = (Math.random()-0.5)*8;
+    partNormals[i*3] = 0; partNormals[i*3+1] = 1; partNormals[i*3+2] = 0;
     roles[i] = 0;
-    sizes[i] = 0.2;
-    colors[i*3]=0.6; colors[i*3+1]=0.45; colors[i*3+2]=0.25;
+    sizes[i] = 0.18;
+    colors[i*3]=0.55; colors[i*3+1]=0.45; colors[i*3+2]=0.32;
   }
+  // 通知 GPU 法线已变（颜色/大小由调用者标记 needsUpdate）
+  geometry.getAttribute('aNormal').needsUpdate = true;
 }
 
 
@@ -1324,6 +1353,21 @@ function tick(){
   const targetLightMix = (mode === MODE.SCENE || mode === MODE.TRANSITION) ? 1 : 0.4;
   particleMaterial.uniforms.uLightMix.value += (targetLightMix - particleMaterial.uniforms.uLightMix.value) * 0.04;
   ambMat.uniforms.uLightMix.value += (targetLightMix - ambMat.uniforms.uLightMix.value) * 0.04;
+
+  // —— 沙雕模式切换：成形态启用 Lambert 阴影 + Normal Blending（粒子互相遮挡，做出实体感） ——
+  // 飘动/聚合/散落态：保持 Additive Blending（云雾发光感）
+  const wantSculpt = (mode === MODE.SCENE) &&
+                     (sceneState === SCENE_STATE.HELD || sceneState === SCENE_STATE.FORMED);
+  const targetSculpt = wantSculpt ? 1.0 : 0.0;
+  particleMaterial.uniforms.uSculpt.value += (targetSculpt - particleMaterial.uniforms.uSculpt.value) * 0.06;
+  // 当 uSculpt 越过 0.5，切换混合模式（避免每帧切，加滞回）
+  const sculptVal = particleMaterial.uniforms.uSculpt.value;
+  const wantBlend = sculptVal > 0.5 ? THREE.NormalBlending : THREE.AdditiveBlending;
+  if(particleMaterial.blending !== wantBlend){
+    particleMaterial.blending = wantBlend;
+    particleMaterial.depthWrite = (wantBlend === THREE.NormalBlending); // 沙雕态开 depthWrite，让前后粒子真遮挡
+    particleMaterial.needsUpdate = true;
+  }
 
   /* ---------- 相机控制 ---------- */
   if(!tween){
