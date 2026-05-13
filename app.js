@@ -26,7 +26,7 @@ console.log('[perf] 粒子数 COUNT =', COUNT, ' isMobile =', isMobile,
 const AMBIENT_COUNT = isMobile ? 1000 : 1800;
 
 /* ---------- 真实3D模型采样：塞塔尔（Setar，波斯弹拨乐器） ---------- */
-const KAMANCHEH_MODEL_URL = './setar__persian_musical_instrument.glb';
+const KAMANCHEH_MODEL_URL = 'https://mat1.gtimg.com/qqcdn/redian/sand_test/setar__persian_musical_instrument_compressed.glb';
 let kamanchehSampledPoints = null;  // 采样得到的 [{x,y,z,nx,ny,nz}, ...]
 let kamanchehLoading = false;
 let kamanchehLoadFailed = false;
@@ -39,7 +39,10 @@ function loadKamanchehModel(){
     return;
   }
   kamanchehLoading = true;
+  const dracoLoader = new THREE.DRACOLoader();
+  dracoLoader.setDecoderPath('https://mat1.gtimg.com/qqcdn/redian/sand_test/draco/');
   const loader = new THREE.GLTFLoader();
+  loader.setDRACOLoader(dracoLoader);
   loader.load(KAMANCHEH_MODEL_URL, (gltf) => {
     try{
       // 1. 收集所有可采样的 mesh（先把世界变换烘焙到 geometry）
@@ -127,20 +130,28 @@ function loadKamanchehModel(){
         candN[i*3+1] = _tmpN.y;
         candN[i*3+2] = _tmpN.z;
 
-        // —— 按高度划分区域：琴箱明显加密，琴颈适度稀疏 —— 
-        // 塞塔尔结构：琴箱下 35%、琴颈中 50%、琴头上 15%
-        // 琴箱表面积大、是视觉主体；琴颈细长，粒子少一点反而更清爽
+        // —— 按高度划分区域：琴箱、琴颈、琴头都要饱满 —— 
+        // 关键：MeshSurfaceSampler 按表面积采样，琴颈是细长棒，表面积天然最大，
+        // 不强力压制就会吃掉 70%+ 粒子，导致琴箱/琴头几乎没粒子。
+        // 经实测（150k 总数）：颈 1.0 / 箱 4.5 / 头 9.0 → 颈占 71%、箱仅 3.7%。
+        // 现在颈砍到 1.5，把腾出的位置全给箱、头、弦区。
         const yRel = (_tmpP.y + by) / (2*by);  // 0~1
         let weight = 1.0;
-        if(yRel < 0.35){
-          // 琴箱：重点加密 ×3.0
-          weight = 3.0;
-        } else if(yRel < 0.85){
-          // 琴颈：减少粒子，让琴颈线条更细更清爽
-          weight = 0.7;
+        if(yRel < 0.38){
+          // 琴箱：主要视觉重心 ×10（原 4.5 太弱）
+          weight = 10.0;
+        } else if(yRel < 0.55){
+          // 箱颈过渡：×4
+          weight = 4.0;
+        } else if(yRel < 0.78){
+          // 琴颈：×3.5（原 1.0 吃掉 71%；砍太狠会断节；3.5 配合大颗粒让琴颈密实）
+          weight = 3.5;
+        } else if(yRel < 0.90){
+          // 弦轴过渡区：×8（琴头下半，加大密度衔接）
+          weight = 8.0;
         } else {
-          // 琴头：略加密
-          weight = 1.4;
+          // 琴头/琴顶：×16（视面积极小，必须高密度才显眼）
+          weight = 16.0;
         }
         candWeight[i] = weight;
       }
@@ -168,17 +179,31 @@ function loadKamanchehModel(){
         normals[i*3+2] = candN[lo*3+2];
       }
 
-      // —— 让琴整体倾斜：绕 Z 轴 +12°（适度倾斜，靠在木架上） ——
-      const TILT_RAD = 12 * Math.PI / 180;
-      const cosT = Math.cos(TILT_RAD);
-      const sinT = Math.sin(TILT_RAD);
+      // —— 让琴整体倾斜：绕 Z 轴 +12°（琴头向右侧微倾，靠在木架上） ——
+      const TILT_Z_RAD = 12 * Math.PI / 180;
+      const cosZ = Math.cos(TILT_Z_RAD);
+      const sinZ = Math.sin(TILT_Z_RAD);
       for(let i=0; i<SAMPLE_N; i++){
         const x = points[i*3], y = points[i*3+1];
-        points[i*3]   = x * cosT - y * sinT;
-        points[i*3+1] = x * sinT + y * cosT;
+        points[i*3]   = x * cosZ - y * sinZ;
+        points[i*3+1] = x * sinZ + y * cosZ;
         const nx = normals[i*3], ny = normals[i*3+1];
-        normals[i*3]   = nx * cosT - ny * sinT;
-        normals[i*3+1] = nx * sinT + ny * cosT;
+        normals[i*3]   = nx * cosZ - ny * sinZ;
+        normals[i*3+1] = nx * sinZ + ny * cosZ;
+      }
+
+      // —— 让琴头向画面内倾斜：绕 X 轴 -15°（琴顶端推向 -Z，琴脚朝向相机） ——
+      // 绕 X 轴正转让 Y→Z、Z→-Y；负转让顶部往 -Z（远离相机）走
+      const TILT_X_RAD = -15 * Math.PI / 180;
+      const cosX = Math.cos(TILT_X_RAD);
+      const sinX = Math.sin(TILT_X_RAD);
+      for(let i=0; i<SAMPLE_N; i++){
+        const y = points[i*3+1], z = points[i*3+2];
+        points[i*3+1] = y * cosX - z * sinX;
+        points[i*3+2] = y * sinX + z * cosX;
+        const ny = normals[i*3+1], nz = normals[i*3+2];
+        normals[i*3+1] = ny * cosX - nz * sinX;
+        normals[i*3+2] = ny * sinX + nz * cosX;
       }
 
       kamanchehSampledPoints = { points, normals, bbox: merged.boundingBox.clone() };
@@ -243,7 +268,7 @@ function loadKamanchehModel(){
           tweenCamera(
             { x:camera.position.x, y:camera.position.y, z:camera.position.z,
               tx:cameraTarget.x, ty:cameraTarget.y, tz:cameraTarget.z },
-            { x:0, y:newCam.y, z:newCam.z, tx:0, ty:0, tz:0 },
+            { x:0, y:newCam.y, z:newCam.z, tx:0, ty:newCam.lookY, tz:0 },
             1200, easeInOutCubic, null
           );
           console.log('[setar] 已根据真实模型尺寸调整相机距离到 z='+newCam.z.toFixed(1));
@@ -339,21 +364,35 @@ camera.position.set(MAP_CAM_DEFAULT.x, MAP_CAM_DEFAULT.y, MAP_CAM_DEFAULT.z);
 camera.lookAt(0, 0, 0);
 
 /* ---------- 贴图 ---------- */
-/* ---------- 贴图（沙粒：暗中心 + 软边，不再是发光圆点） ---------- */
+/* ---------- 贴图（沙粒：每颗自带 3D 球体明暗，营造体积感） ---------- */
 function makeSpriteTexture(){
   const size = 128;
   const c = document.createElement('canvas');
   c.width = c.height = size;
   const g = c.getContext('2d');
-  // 软圆 alpha 蒙版（白色 = 用本色，alpha 衰减到边缘）
-  // 这样片段着色器里 col = vColor * lighting * tc.a，能保留暗面
-  const grd = g.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-  grd.addColorStop(0.0, 'rgba(255,255,255,1.0)');
-  grd.addColorStop(0.35,'rgba(255,255,255,0.85)');
-  grd.addColorStop(0.7, 'rgba(255,255,255,0.30)');
-  grd.addColorStop(1.0, 'rgba(255,255,255,0)');
+
+  // —— 关键：每颗粒子画成"被左上光照射的小球"——
+  // 这样即使没有重叠，每颗粒子单看就是个 3D 沙粒，整体自带光影
+  const cx = size * 0.40;  // 高光中心略偏左上
+  const cy = size * 0.40;
+  const grd = g.createRadialGradient(cx, cy, 0, size/2, size/2, size/2);
+  grd.addColorStop(0.00, 'rgba(255,255,255,1.0)');   // 高光（亮）
+  grd.addColorStop(0.30, 'rgba(220,220,220,0.95)');  // 中亮
+  grd.addColorStop(0.55, 'rgba(140,140,140,0.85)');  // 中暗（关键：粒子本身就有暗部）
+  grd.addColorStop(0.78, 'rgba(70,70,70,0.55)');     // 暗面
+  grd.addColorStop(0.95, 'rgba(30,30,30,0.20)');     // 边缘极暗
+  grd.addColorStop(1.0,  'rgba(20,20,20,0)');        // 透明
   g.fillStyle = grd;
   g.fillRect(0,0,size,size);
+  // 圆形 alpha 蒙版（裁掉方形边角）
+  g.globalCompositeOperation = 'destination-in';
+  const mask = g.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  mask.addColorStop(0.0, 'rgba(0,0,0,1)');
+  mask.addColorStop(0.85,'rgba(0,0,0,1)');
+  mask.addColorStop(1.0, 'rgba(0,0,0,0)');
+  g.fillStyle = mask;
+  g.fillRect(0,0,size,size);
+
   const tex = new THREE.CanvasTexture(c);
   tex.needsUpdate = true;
   return tex;
@@ -431,7 +470,7 @@ const sizes       = new Float32Array(COUNT);
 const colors      = new Float32Array(COUNT * 3);
 const seeds       = new Float32Array(COUNT);
 const roles       = new Float32Array(COUNT);
-const shatterLife = new Float32Array(COUNT);
+const releaseLife = new Float32Array(COUNT);
 const scatteredPos= new Float32Array(COUNT * 3);
 const partNormals = new Float32Array(COUNT * 3); // 每颗粒子的真实表面法线（来自 GLB）
 
@@ -447,72 +486,134 @@ const particleMaterial = new THREE.ShaderMaterial({
   uniforms: {
     uTex:{value:spriteTex}, uPixelRatio:{value:renderer.getPixelRatio()},
     uTime:{value:0}, uSizeMul:{value:1.0}, uBrightness:{value:1.0},
-    // 强方向光：从左上 45° 打来（与参考图一致）
-    uLightDir:{value:new THREE.Vector3(-0.55, 0.78, 0.30).normalize()},
-    uLightColor:{value:new THREE.Color(1.0, 0.92, 0.78)}, // 暖白光
-    uShadowColor:{value:new THREE.Color(0.05, 0.04, 0.03)}, // 暗面接近黑
-    uAmbient:{value:0.08},   // 环境光极弱（让背光面真黑）
+    // 强方向光：从【右上侧】打来（z 分量缩小到 0.15，更"侧"，让前后朝向亮暗差更明显）
+    // 这样琴自转时正面/背面会有清晰的明暗交替，方便观察旋转方向
+    uLightDir:{value:new THREE.Vector3(0.78, 0.62, 0.15).normalize()},
+    uLightColor:{value:new THREE.Color(1.0, 0.92, 0.75)}, // 暖白光
+    uShadowColor:{value:new THREE.Color(0.18, 0.13, 0.09)}, // 暗面：更深的暗暖棕，加强对比
+    uAmbient:{value:0.32},   // 环境光降低（让背光面更暗，凸显旋转）
     uLightMix:{value:0.0},   // 0=地图均匀光、1=场景方向光（沙雕态）
     uWobble:{value:1.0},
     uSculpt:{value:0.0},     // 0=粒子飘动态、1=沙雕态（影响混合模式行为）
+    uGroundMode:{value:0.0}, // 0=用真法线（琴体）、1=地面沙堆（统一朝上法线 + 微噪声）
   },
   vertexShader: `
     attribute float aSize; attribute vec3 aColor; attribute float aSeed;
     attribute vec3 aNormal;
-    uniform float uPixelRatio, uTime, uSizeMul, uWobble;
+    uniform float uPixelRatio, uTime, uSizeMul, uWobble, uGroundMode;
     uniform vec3 uLightDir;
     varying vec3 vColor;
     varying float vLight;
     varying float vNDotL;
+    varying float vNDotV;
+    varying float vSeed;
     void main(){
       vColor = aColor;
+      vSeed = aSeed;
       vec3 pos = position;
       float wob = 0.35 * uWobble;
       pos.x += sin(uTime*0.7 + aSeed*30.0) * wob;
       pos.y += cos(uTime*0.6 + aSeed*20.0) * wob * 0.7;
       pos.z += sin(uTime*0.8 + aSeed*40.0) * wob;
-      // —— 用真法线（aNormal）做 Lambert，比"位置-原点"准确百倍 ——
-      // 没有法线（length<0.01，比如氛围粒子）时降级用位置法线
-      vec3 nrm = aNormal;
-      if(length(nrm) < 0.1){
-        nrm = normalize(pos - vec3(0.0, -10.0, 0.0));
+      // —— 法线 ——
+      // 琴态：用 GLB 真法线
+      // 地面沙堆态：用"朝上 + 噪声扰动"法线，让沙堆有微起伏阴影
+      vec3 nrm;
+      if(uGroundMode > 0.5){
+        // 沙堆：基础朝上 (0,1,0) + 用 seed 做伪噪声扰动
+        float n1 = sin(aSeed * 137.0) * 0.6;
+        float n2 = cos(aSeed * 71.0) * 0.6;
+        nrm = normalize(vec3(n1, 1.0, n2));
+      } else {
+        nrm = aNormal;
+        if(length(nrm) < 0.1){
+          nrm = normalize(pos - vec3(0.0, -10.0, 0.0));
+        }
       }
-      vNDotL = dot(normalize(nrm), normalize(uLightDir));
+      // 关键：把本地法线转到世界空间，这样琴旋转时光方向不跟着转
+      // （Three.js 提供的 normalMatrix 是 modelViewMatrix 的法线矩阵）
+      vec3 worldNrm = normalize(mat3(modelMatrix) * nrm);
+      vNDotL = dot(worldNrm, normalize(uLightDir));
       vLight = vNDotL * 0.5 + 0.5;
       vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
-      gl_PointSize = aSize * uSizeMul * 140.0 / -mvPos.z * uPixelRatio;
+      // —— vNDotV：判定粒子朝向相机还是背向相机 ——
+      // 在【视图空间】里算：法线用 normalMatrix 转到视图空间，
+      // 视线方向就是从粒子指向相机原点 = normalize(-mvPos.xyz)
+      // 这样就能避免 inverse(viewMatrix)（GLSL ES 1.00 没有 inverse）
+      vec3 viewNrm = normalize(normalMatrix * nrm);
+      vec3 viewDir = normalize(-mvPos.xyz);
+      vNDotV = dot(viewNrm, viewDir);  // >0 朝向相机（正面）, <0 背向（背面）
+      gl_PointSize = aSize * uSizeMul * 220.0 / -mvPos.z * uPixelRatio;
       gl_Position = projectionMatrix * mvPos;
     }`,
   fragmentShader: `
     uniform sampler2D uTex;
-    uniform float uBrightness, uAmbient, uLightMix, uSculpt;
+    uniform float uBrightness, uAmbient, uLightMix, uSculpt, uGroundMode;
     uniform vec3 uLightColor, uShadowColor;
     varying vec3 vColor;
     varying float vLight;
     varying float vNDotL;
+    varying float vNDotV;
+    varying float vSeed;
     void main(){
       vec4 tc = texture2D(uTex, gl_PointCoord);
       if(tc.a < 0.01) discard;
 
-      // —— Lambert：背光面真的是黑（不是只是变暗） ——
-      // ndotl 范围 -1~+1：负值代表背光，钳到 0 = 完全黑
-      float lambert = max(vNDotL, 0.0);
-      // 用 smoothstep 让明暗过渡更"硬"（沙雕的强对比感）
-      float lit = smoothstep(0.0, 0.6, lambert);
+      // —— Lambert 光照：强对比 + 保留细节 ——
+      // 用 half-lambert (ndotl*0.5+0.5) 做基础，smoothstep 强化对比
+      float lambert = vNDotL * 0.5 + 0.5;  // 0~1
+      // 单段 smoothstep 有锐利的明暗分界，比 3 段混合更"硬朗雕塑感"
+      float lit = smoothstep(0.15, 0.85, lambert);
 
-      // 沙雕态（uSculpt=1）：暗面 = 阴影色（极暗），亮面 = 暖光照射的本色
-      vec3 sandShadow = vColor * uShadowColor * 6.0; // 阴影区颜色（保留一点本色）
-      vec3 sandLit    = vColor * uLightColor * (uAmbient + lit * 1.3);
+      // 沙雕态（uSculpt=1）：
+      // 暗面 ≈ 颜色×阴影色×5（更深的暗暖棕，强化侧光对比）
+      // 亮面 ≈ 颜色×暖光×(0.9 + lit×2.6)（高光显著更强）
+      vec3 sandShadow = vColor * uShadowColor * 5.0;
+      vec3 sandLit    = vColor * uLightColor * (uAmbient + lit * 2.6);
       vec3 sculptCol  = mix(sandShadow, sandLit, lit);
+
+      // 额外的高光强化：迎光面打一个更宽更亮的暖色 "rim"，让旋转时"扫光"格外明显
+      // 关键：高光必须乘 vColor，否则深色花纹会被纯暖白洗掉，纹路消失！
+      float hotSpotBroad = smoothstep(0.55, 1.0, lambert);
+      float hotSpotPeak  = pow(smoothstep(0.78, 1.0, lambert), 2.0);
+      sculptCol += vColor * uLightColor * hotSpotBroad * 1.1;
+      sculptCol += vColor * uLightColor * hotSpotPeak  * 1.4;
+
+      // —— 前后区分：解决空心琴前后粒子叠在一起、分不清朝向的问题 ——
+      // 1) 背面适度压暗 + 降饱和：让"透过去的后面"沉下去，但不能压没（否则细颈消失）
+      // 2) 轮廓边（n·v ≈ 0）打 rim light：勾勒琴的外形剪影
+      // 3) 正面（n·v > 0）保持原色
+      float facing = vNDotV;                            // -1 ~ +1
+      float backFade = smoothstep(-0.2, 0.5, facing);   // 0=后面, 1=前面
+      // 背面降饱和到灰，但保留 50% 亮度（避免琴颈/琴头这种细处直接消失）
+      float gray = (sculptCol.r + sculptCol.g + sculptCol.b) / 3.0;
+      sculptCol = mix(vec3(gray) * 0.50, sculptCol, 0.45 + 0.55 * backFade);
+      // 轮廓 rim：n·v 接近 0 的位置（侧面），打一道暖色边光勾轮廓
+      float rim = pow(1.0 - abs(facing), 3.0);
+      sculptCol += uLightColor * rim * 0.45;
+
+      // 地面沙堆态额外处理：整体降亮 + 颗粒色调随机（增加层次）
+      if(uGroundMode > 0.5){
+        // 颗粒级随机变暗（沙子是暗哑的，不全亮）
+        float darken = 0.4 + fract(vSeed * 91.7) * 0.5; // 0.4~0.9 的随机暗度
+        sculptCol *= darken * 0.55; // 整体压暗到 22%~50%
+      }
 
       // 地图态（uSculpt=0）：保留原来的亮粒子风格
       vec3 mapCol = vColor * (0.5 + lit * 0.8) * uBrightness;
-      // 给地图态加一点暖光晕，保持原氛围
       mapCol = mix(mapCol, mapCol * uLightColor * 1.2, lit * 0.4);
 
       vec3 col = mix(mapCol, sculptCol, uSculpt);
 
-      // alpha：沙雕态满 alpha（实体感）；飘动态半透明（云雾感）
+      // —— 关键：把 sprite 自带的 3D 球体明暗（tc.rgb）乘到颜色上 ——
+      // tc.rgb 是 0~1 的灰度，代表每颗粒子内部的"立体感"
+      // 沙雕态完全使用 sprite 明暗（×1.5 增强对比），地图态保留一半
+      float spriteShade = (tc.r + tc.g + tc.b) / 3.0;
+      // sculpt=0 时只乘 0.5+0.5*shade（保留原亮度），sculpt=1 时全用 shade（强 3D 感）
+      float shadeFactor = mix(0.5 + 0.5 * spriteShade, 0.4 + 1.0 * spriteShade, uSculpt);
+      col *= shadeFactor;
+
+      // alpha：沙雕态满 alpha；飘动态半透明
       float alpha = mix(tc.a * 0.85, tc.a, uSculpt);
       gl_FragColor = vec4(col * uBrightness, alpha);
     }`,
@@ -688,16 +789,39 @@ function buildWaitingTargets(){
 function buildKamanchehFromModel(){
   window.__targetsFromModel = true;
   const { points, normals } = kamanchehSampledPoints;
-  const Y_OFFSET = 0;
+  // 整体上移 50 单位，确保琴箱完全显示在故事卡片上方
+  const Y_OFFSET = 50;
   const N = Math.min(COUNT, points.length / 3);
+
+  // —— 估算琴箱最大半径（用于识别"赤道"装饰带）——
+  let maxR = 0;
+  // —— 同时统计 Y 范围，用于诊断 yNorm 阈值是否合理 ——
+  let minPY = Infinity, maxPY = -Infinity;
+  for(let i=0; i<N; i++){
+    const dx = points[i*3], dz = points[i*3+2];
+    const r = Math.sqrt(dx*dx + dz*dz);
+    if(r > maxR) maxR = r;
+    const py = points[i*3+1];
+    if(py < minPY) minPY = py;
+    if(py > maxPY) maxPY = py;
+  }
+  if(!isFinite(maxR) || maxR < 1) maxR = 8;
+
+  // —— 自适应：用真实 Y 范围算 yNorm，让琴头/琴箱阈值真正生效 ——
+  // （之前写死 py/65，但模型实际 Y 范围可能不是 ±65，导致 isHead 永远不命中）
+  const halfH = Math.max(1, (maxPY - minPY) * 0.5);
+  const midY  = (maxPY + minPY) * 0.5;
+  // 计数器：诊断每个区被分到的粒子数
+  let cntHead=0, cntString=0, cntBody=0, cntNeck=0;
 
   for(let i=0; i<N; i++){
     targets[i*3]   = points[i*3];
     targets[i*3+1] = points[i*3+1] + Y_OFFSET;
     targets[i*3+2] = points[i*3+2];
 
+    const px = points[i*3], py = points[i*3+1], pz = points[i*3+2];
     const nx = normals[i*3], ny = normals[i*3+1], nz = normals[i*3+2];
-    const yNorm = (points[i*3+1] - 0) / 65; // -1 ~ +1，按高度划分区域
+    const yNorm = (py - midY) / halfH; // -1 ~ +1，按真实模型高度划分
 
     // —— 把真实表面法线写入粒子 attribute（让 shader 做精确 Lambert 光照） ——
     partNormals[i*3]   = nx;
@@ -705,39 +829,164 @@ function buildKamanchehFromModel(){
     partNormals[i*3+2] = nz;
 
     // —— 角色分配（沿用原叙事钩子：roles[i]=1~4 是四根弦） ——
-    const r2 = points[i*3]*points[i*3] + points[i*3+2]*points[i*3+2];
-    const isStringRegion = (yNorm > -0.1 && yNorm < 0.7 && r2 < 6);
+    const r2 = px*px + pz*pz;
+    const radial = Math.sqrt(r2);
+    const radialN = radial / maxR;             // 0~1：离中轴的归一化半径
+    // 阈值改成基于自适应 yNorm：
+    //   琴箱：y < -0.30（下 35%）
+    //   弦区：-0.10 < y < 0.55 且离中轴近
+    //   琴头：y > 0.55（上 22%，把弦轴+琴头一起算琴头，放大视觉权重）
+    //   琴颈：其他
+    const isStringRegion = (yNorm > -0.10 && yNorm < 0.55 && radialN < 0.35);
     if(isStringRegion){
-      const sIdx = Math.max(0, Math.min(3, Math.floor((points[i*3] + 2) / 1)));
+      const sIdx = Math.max(0, Math.min(3, Math.floor((px + 2) / 1)));
       roles[i] = sIdx + 1;
-    } else if(yNorm > 0.7){
+      cntString++;
+    } else if(yNorm > 0.55){
       roles[i] = 5; // 琴头/弦轴区
+      cntHead++;
+    } else if(yNorm < -0.30){
+      roles[i] = 0; // 琴箱
+      cntBody++;
     } else {
-      roles[i] = 0; // 琴体
+      roles[i] = 0; // 琴颈
+      cntNeck++;
     }
 
-    // —— 颜色：统一的米黄沙土底色（不在 CPU 端做光照，光照交给 shader） ——
-    // 参考：沙雕用湿沙，颜色范围 #b89968 ~ #d4b388
-    // 加入轻微的颗粒色彩抖动 + 高度色温变化（底部偏深，顶部偏亮）
+    // —— 颜色：以米黄沙土为底，按"细节区"做差异化，强化品格/装饰/琴箱体积 ——
     const isCoarseGrain = Math.random() < 0.18;
     const grainNoise = 0.88 + Math.random() * 0.20;       // 颗粒间微差异
-    const heightTint = 0.92 + (yNorm + 1) * 0.04;          // 越高越亮一点（被光照射更多）
+    const heightTint = 0.92 + (yNorm + 1) * 0.04;          // 越高越亮
 
-    const isMetal = isStringRegion || roles[i] === 5;
-    if(isMetal){
-      // 弦/琴头：略浅一点的沙土色，融入整体
+    const isHead = (roles[i] === 5);  // 琴头
+    const isBody = (yNorm < -0.30);   // 琴箱（与上面的阈值对齐）
+
+    // ========== 程序化弦线 & 品格线（让琴面板和琴颈有明显细节） ==========
+    // 弦线：4 根弦沿 X 方向分布在 [-1.2, -0.4, 0.4, 1.2] 附近
+    // 它们从琴颈（yNorm≈0.5）延伸到琴箱中部（yNorm≈-0.5）
+    // 仅限面板朝前（nz > 0.3）且离中轴较近（radialN < 0.5）的粒子
+    const onFrontFace = (nz > 0.3 || (Math.abs(ny) < 0.4 && Math.abs(nz) > 0.15));
+    const inStringYRange = (yNorm > -0.50 && yNorm < 0.55);
+    let isOnString = false;
+    if(onFrontFace && inStringYRange && radialN < 0.55){
+      const STRING_X = [-1.0, -0.35, 0.35, 1.0]; // 4 根弦的 X 坐标
+      const STRING_WIDTH = 0.25; // 弦宽度容差
+      for(let s=0; s<4; s++){
+        if(Math.abs(px - STRING_X[s]) < STRING_WIDTH){
+          isOnString = true;
+          break;
+        }
+      }
+    }
+
+    // 品格线：琴颈上每隔一段 Y 距离的横向暗条
+    // yNorm 在 -0.10 ~ 0.55 范围，约每 0.06 间距一条品格线
+    let isOnFret = false;
+    if(!isBody && !isHead && yNorm > -0.10 && yNorm < 0.55){
+      const fretSpacing = 0.055;
+      const fretFrac = ((yNorm + 0.10) / fretSpacing) % 1.0;
+      // 品格线占 15% 宽度
+      if(fretFrac < 0.15 || fretFrac > 0.85){
+        isOnFret = true;
+      }
+    }
+
+    if(isHead){
+      // 琴头/弦轴：视觉焦点。已在采样阶段加密 ×9，这里再用大颗粒撑视觉
+      const base = grainNoise * 1.25;
+      colors[i*3]   = 1.15 * base;
+      colors[i*3+1] = 0.92 * base;
+      colors[i*3+2] = 0.62 * base;
+      // 顶端（弦轴/琴头帽）再放大，做出明确的"形状"
+      const headBoost = (yNorm > 0.85) ? 1.55 : 1.20;
+      sizes[i] = (isCoarseGrain ? 0.80 + Math.random()*0.34
+                                : 0.55 + Math.random()*0.24) * headBoost;
+    } else if(isStringRegion){
+      // 弦区（琴颈中心）
       const base = grainNoise * heightTint;
-      colors[i*3]   = 0.86 * base;  // R
-      colors[i*3+1] = 0.74 * base;  // G
-      colors[i*3+2] = 0.55 * base;  // B
-      sizes[i] = isCoarseGrain ? 0.20 + Math.random() * 0.10 : 0.10 + Math.random() * 0.08;
+      if(isOnString){
+        // 弦线上的粒子：深色细线 + 小颗粒
+        colors[i*3]   = 0.35 * base;
+        colors[i*3+1] = 0.28 * base;
+        colors[i*3+2] = 0.18 * base;
+        sizes[i] = 0.28 + Math.random()*0.10;
+      } else if(isOnFret){
+        // 品格线：浅金属色
+        colors[i*3]   = 0.75 * base;
+        colors[i*3+1] = 0.72 * base;
+        colors[i*3+2] = 0.60 * base;
+        sizes[i] = 0.35 + Math.random()*0.12;
+      } else {
+        colors[i*3]   = 0.90 * base;
+        colors[i*3+1] = 0.76 * base;
+        colors[i*3+2] = 0.55 * base;
+        sizes[i] = isCoarseGrain ? 0.65 + Math.random()*0.20
+                                 : 0.45 + Math.random()*0.18;
+      }
+    } else if(isBody){
+      // 琴箱：分层做出立体装饰感 + 弦线
+      const isEquator = (radialN > 0.78);
+      const isBottom  = (ny < -0.25);
+      const base = grainNoise * heightTint;
+
+      if(isOnString && onFrontFace){
+        // 琴箱面板上的弦线：深色细线，像真实弦一样可见
+        colors[i*3]   = 0.32 * base;
+        colors[i*3+1] = 0.25 * base;
+        colors[i*3+2] = 0.15 * base;
+        sizes[i] = 0.22 + Math.random()*0.08;
+      } else if(isEquator){
+        // 装饰带：8 瓣花式，亮处极亮（金）/ 暗处极暗（深棕），拉到 3x 对比
+        const ang = Math.atan2(pz, px);
+        const motif = Math.sin(ang * 8.0);
+        if(motif > 0.3){
+          // 亮花瓣：金亮色，颗粒大像浮雕凸起
+          colors[i*3]   = 1.05 * base;
+          colors[i*3+1] = 0.85 * base;
+          colors[i*3+2] = 0.50 * base;
+          sizes[i] = 0.40 + Math.random()*0.18;
+        } else {
+          // 暗花瓣：深棕嵌花
+          colors[i*3]   = 0.42 * base;
+          colors[i*3+1] = 0.28 * base;
+          colors[i*3+2] = 0.18 * base;
+          sizes[i] = 0.22 + Math.random()*0.10;
+        }
+      } else if(isBottom){
+        colors[i*3]   = 0.70 * base;
+        colors[i*3+1] = 0.55 * base;
+        colors[i*3+2] = 0.38 * base;
+        sizes[i] = isCoarseGrain ? 0.34 + Math.random()*0.16
+                                 : 0.20 + Math.random()*0.12;
+      } else {
+        colors[i*3]   = 0.86 * base;
+        colors[i*3+1] = 0.72 * base;
+        colors[i*3+2] = 0.52 * base;
+        sizes[i] = isCoarseGrain ? 0.34 + Math.random()*0.18
+                                 : 0.18 + Math.random()*0.14;
+      }
     } else {
-      // 琴体：暖沙色（米黄 #c9a978 偏移）
+      // 琴颈（非弦区、非琴箱、非琴头）
       const base = grainNoise * heightTint;
-      colors[i*3]   = 0.82 * base;  // R
-      colors[i*3+1] = 0.68 * base;  // G
-      colors[i*3+2] = 0.48 * base;  // B
-      sizes[i] = isCoarseGrain ? 0.28 + Math.random() * 0.16 : 0.13 + Math.random() * 0.14;
+      if(isOnFret){
+        // 品格线：横向暗条（金属品格）
+        colors[i*3]   = 0.72 * base;
+        colors[i*3+1] = 0.68 * base;
+        colors[i*3+2] = 0.55 * base;
+        sizes[i] = 0.55 + Math.random()*0.15;
+      } else if(isOnString){
+        // 弦线穿过琴颈：深色
+        colors[i*3]   = 0.38 * base;
+        colors[i*3+1] = 0.30 * base;
+        colors[i*3+2] = 0.20 * base;
+        sizes[i] = 0.35 + Math.random()*0.12;
+      } else {
+        colors[i*3]   = 0.92 * base;
+        colors[i*3+1] = 0.78 * base;
+        colors[i*3+2] = 0.55 * base;
+        sizes[i] = isCoarseGrain ? 0.75 + Math.random()*0.25
+                                 : 0.50 + Math.random()*0.20;
+      }
     }
   }
   // 兜底剩余粒子
@@ -752,6 +1001,16 @@ function buildKamanchehFromModel(){
   }
   // 通知 GPU 法线已变（颜色/大小由调用者标记 needsUpdate）
   geometry.getAttribute('aNormal').needsUpdate = true;
+
+  // —— 诊断日志：让我们看到每个区到底有多少粒子 ——
+  console.log('[setar 区域分布] py范围:', minPY.toFixed(1), '~', maxPY.toFixed(1),
+              ' midY:', midY.toFixed(1), ' halfH:', halfH.toFixed(1),
+              ' maxR:', maxR.toFixed(1));
+  console.log('[setar 区域分布] 琴头:', cntHead,
+              ' 弦区:', cntString,
+              ' 琴箱:', cntBody,
+              ' 琴颈:', cntNeck,
+              ' 总:', N);
 }
 
 
@@ -936,12 +1195,13 @@ function computeSceneCamera(){
     src = '真模型';
   }
 
-  const safetyMul = 2.0;  // 合理距离，让琴占画面约一半高度
+  const safetyMul = 2.0;
   const distH = (objH * 0.5) / Math.tan(fovRad / 2);
   const distW = (objW * 0.5) / Math.tan(fovRad / 2) / Math.max(aspect, 0.01);
   const z = Math.max(distH, distW) * safetyMul;
   const finalZ = Math.max(180, Math.min(500, z));
-  return { y: 0, z: finalZ };
+  // 相机抬高到琴的几何中心（琴整体上移 50，相机也抬高 + 看向同一点）
+  return { y: 50, z: finalZ, lookY: 50 };
 }
 
 function enterScene(idx){
@@ -995,7 +1255,7 @@ function enterScene(idx){
     { x:camera.position.x, y:camera.position.y, z:camera.position.z,
       tx:cameraTarget.x, ty:cameraTarget.y, tz:cameraTarget.z },
     { x:0, y:sceneCamSetup.y, z:sceneCamSetup.z,
-      tx:0, ty:0, tz:0 },
+      tx:0, ty:sceneCamSetup.lookY, tz:0 },
     1800, easeInOutCubic,
     () => {
       mode = MODE.SCENE;
@@ -1022,10 +1282,13 @@ function enterScene(idx){
 /* 为场景生成地面散落位置（扁平、贴地的沙粒分布） */
 function buildSceneGroundPositions(){
   for(let i=0; i<COUNT; i++){
-    // 扁平散布在地面（Y 在 -55 ~ -45 之间，XZ 范围较大）
-    scatteredPos[i*3]   = (Math.random()-0.5) * 160;
-    scatteredPos[i*3+1] = -50 + (Math.random()-0.5) * 6;
-    scatteredPos[i*3+2] = (Math.random()-0.5) * 100 - 20;
+    // 大范围散布在地面，避免高密度堆积导致"亮光斑"
+    // X: -200 ~ +200（覆盖整个画面宽度），Z: -120 ~ +80（覆盖远近）
+    // Y: 紧贴地面，但加更大的高度抖动让堆有起伏感
+    scatteredPos[i*3]   = (Math.random()-0.5) * 400;
+    // 让粒子在地面以下也有一些（"埋"在沙里），形成堆叠层次
+    scatteredPos[i*3+1] = -50 - Math.pow(Math.random(), 2) * 8 + (Math.random()-0.5) * 3;
+    scatteredPos[i*3+2] = (Math.random()-0.5) * 200 - 30;
   }
 }
 
@@ -1147,6 +1410,21 @@ function sceneStartPress(){
     geometry.getAttribute('aColor').needsUpdate = true;
   }
 
+  // —— 关键：每次重新长按前，把粒子归位到固定散落位置 ——
+  // 否则上一轮 RELEASING 风场把粒子吹得到处都是，下一次聚合起点不一致
+  // 会让琴的轮廓越来越模糊（粒子从远处飘过来时容易卡在半路）
+  for(let i=0; i<COUNT; i++){
+    const i3 = i*3;
+    positions[i3]   = scatteredPos[i3];
+    positions[i3+1] = scatteredPos[i3+1];
+    positions[i3+2] = scatteredPos[i3+2];
+    velocities[i3]   = 0;
+    velocities[i3+1] = 0;
+    velocities[i3+2] = 0;
+    releaseLife[i] = 0; // 清掉上一轮残留的崩解倒计时
+  }
+  geometry.attributes.position.needsUpdate = true;
+
   sceneState = SCENE_STATE.GATHERING;
   sceneFormed = false;
   pressStart = performance.now();
@@ -1169,7 +1447,26 @@ function sceneEndPress(){
     nextHint.classList.remove('show');
     pressProgress = 0; // 进度条清零
 
-    // 3.5 秒后回到散落静止态，重新提示长按（给粒子充足时间慢慢落下）
+    // —— 流沙崩解：给每颗粒子一个"开始下落"的延迟时间 ——
+    // 高位粒子先开始（琴头先碎、琴箱后塌），同高度有随机相位让分层不规则
+    // releaseLife[i] 当倒计时（>0 = 还没开始下落）
+    let minY = Infinity, maxY = -Infinity;
+    for(let i=0; i<COUNT; i++){
+      const y = positions[i*3+1];
+      if(y < minY) minY = y;
+      if(y > maxY) maxY = y;
+    }
+    const spanY = Math.max(1, maxY - minY);
+    for(let i=0; i<COUNT; i++){
+      const yRel = (positions[i*3+1] - minY) / spanY;  // 0=底部、1=顶部
+      // 顶部立即崩（延迟=0），底部延迟 0.6s，同高度随机 0~0.15s
+      const heightDelay = (1 - yRel) * 0.6;            // 0.0~0.6
+      const randomPhase = Math.random() * 0.15;
+      releaseLife[i] = heightDelay + randomPhase;       // 单位：秒
+    }
+    releaseStartTime = performance.now();
+
+    // 5.5 秒后回到散落静止态（给流沙更长时间完整下落）
     setTimeout(()=>{
       if(sceneState === SCENE_STATE.RELEASING){
         sceneState = SCENE_STATE.IDLE;
@@ -1177,9 +1474,10 @@ function sceneEndPress(){
           pressHintEl.classList.add('show');
         }
       }
-    }, 3500);
+    }, 5500);
   }
 }
+let releaseStartTime = 0;
 
 /* ---------- 指针事件（地图 & 场景都用拖拽转视角） ---------- */
 canvas.addEventListener('pointerdown', (e)=>{
@@ -1354,18 +1652,30 @@ function tick(){
   particleMaterial.uniforms.uLightMix.value += (targetLightMix - particleMaterial.uniforms.uLightMix.value) * 0.04;
   ambMat.uniforms.uLightMix.value += (targetLightMix - ambMat.uniforms.uLightMix.value) * 0.04;
 
-  // —— 沙雕模式切换：成形态启用 Lambert 阴影 + Normal Blending（粒子互相遮挡，做出实体感） ——
-  // 飘动/聚合/散落态：保持 Additive Blending（云雾发光感）
+  // —— 沙雕模式切换：成形态 + 散落到地面态 都启用 Lambert + Normal Blending ——
+  // 飘动/聚合/进入过渡：保持 Additive Blending（云雾发光感）
+  // 已成形 / 已散落到地面（IDLE） / 正在散落（RELEASING） → 实体感
   const wantSculpt = (mode === MODE.SCENE) &&
-                     (sceneState === SCENE_STATE.HELD || sceneState === SCENE_STATE.FORMED);
+                     (sceneState === SCENE_STATE.HELD ||
+                      sceneState === SCENE_STATE.FORMED ||
+                      sceneState === SCENE_STATE.IDLE ||
+                      sceneState === SCENE_STATE.RELEASING);
   const targetSculpt = wantSculpt ? 1.0 : 0.0;
   particleMaterial.uniforms.uSculpt.value += (targetSculpt - particleMaterial.uniforms.uSculpt.value) * 0.06;
+
+  // —— 地面沙堆模式：未成形（IDLE/RELEASING）时启用，让粒子用"朝上+噪声法线"暗哑下来 ——
+  const wantGround = (mode === MODE.SCENE) &&
+                     (sceneState === SCENE_STATE.IDLE ||
+                      sceneState === SCENE_STATE.RELEASING);
+  const targetGround = wantGround ? 1.0 : 0.0;
+  particleMaterial.uniforms.uGroundMode.value += (targetGround - particleMaterial.uniforms.uGroundMode.value) * 0.08;
+
   // 当 uSculpt 越过 0.5，切换混合模式（避免每帧切，加滞回）
   const sculptVal = particleMaterial.uniforms.uSculpt.value;
   const wantBlend = sculptVal > 0.5 ? THREE.NormalBlending : THREE.AdditiveBlending;
   if(particleMaterial.blending !== wantBlend){
     particleMaterial.blending = wantBlend;
-    particleMaterial.depthWrite = (wantBlend === THREE.NormalBlending); // 沙雕态开 depthWrite，让前后粒子真遮挡
+    particleMaterial.depthWrite = (wantBlend === THREE.NormalBlending);
     particleMaterial.needsUpdate = true;
   }
 
@@ -1418,12 +1728,13 @@ function tick(){
     } else if(mode === MODE.SCENE){
       // 场景模式下：相机绕物体做小幅轨道（动态计算距离以适配各屏幕）
       const sc = computeSceneCamera();
-      const yaw = useGyro ? gyroYaw * 0.6 : camYaw * 0.6;
-      const rad = isMobile ? 35 : 25;
+      // 轨道幅度降低（0.6→0.3），让琴大致保持居中，允许轻微视角感
+      const yaw = useGyro ? gyroYaw * 0.3 : camYaw * 0.3;
+      const rad = isMobile ? 20 : 15;
       camera.position.x = 0 + Math.sin(yaw) * rad;
       camera.position.y = sc.y;
       camera.position.z = sc.z + (Math.cos(yaw)-1) * rad;
-      camera.lookAt(0, 0, 0);
+      camera.lookAt(0, sc.lookY, 0);
     }
   }
 
@@ -1454,11 +1765,11 @@ function tick(){
   // —— 粒子力 ——
   let gathering, gatherForce, scatterForce, damping;
   if(enteringScene){
-    // 正在进入场景过渡：粒子保持静止在地面，不施加任何力
+    // 正在进入场景过渡：粒子在地面做轻微呼吸运动（自由散沙感），不施加聚合力
     gathering = false;
     gatherForce = 0;
     scatterForce = 0;
-    damping = 0.5; // 强阻尼让粒子快速静止
+    damping = 0.92; // 温和阻尼（非死停）
   } else if(mode === MODE.MAP || mode === MODE.TRANSITION){
     gathering = true;
     gatherForce = 0.018;
@@ -1490,12 +1801,18 @@ function tick(){
     }
   }
 
-  const targetBrightness = (mode === MODE.SCENE && (sceneState===SCENE_STATE.HELD || sceneState===SCENE_STATE.FORMED)) ? 1.05 :
+  // 亮度：成形态拉高（让暗面也能看到结构）、聚合中渐亮、地面散落态压暗
+  const isOnGround = mode===MODE.SCENE && (sceneState===SCENE_STATE.IDLE || sceneState===SCENE_STATE.RELEASING);
+  const targetBrightness = (mode === MODE.SCENE && (sceneState===SCENE_STATE.HELD || sceneState===SCENE_STATE.FORMED)) ? 1.65 :
+                           isOnGround ? 0.55 :
                            (gathering ? 0.70 + pressProgress*0.30 : 0.65);
   particleMaterial.uniforms.uBrightness.value += (targetBrightness - particleMaterial.uniforms.uBrightness.value) * 0.08;
 
-  const targetSize = (mode===MODE.SCENE && (sceneState===SCENE_STATE.HELD || sceneState===SCENE_STATE.FORMED)) ? 0.40 :
-                     (mode===MODE.MAP ? 0.7 : 0.75);
+  // 粒子大小：成形态紧凑、地面散落态最小（细沙感）、其他略大
+  // 粒子大小：成形态加大让相邻粒子重叠（实体感）、地面散落态最小、其他略大
+  const targetSize = (mode===MODE.SCENE && (sceneState===SCENE_STATE.HELD || sceneState===SCENE_STATE.FORMED)) ? 0.65 :
+                     isOnGround ? 0.20 :
+                     (mode===MODE.MAP ? 0.55 : 0.55);
   particleMaterial.uniforms.uSizeMul.value += (targetSize - particleMaterial.uniforms.uSizeMul.value) * 0.06;
 
   // 抖动控制：成形态时极弱（显细节），其他时候保持流沙飘动
@@ -1505,36 +1822,34 @@ function tick(){
   // —— 粒子积分 ——
   for(let i=0; i<COUNT; i++){
     const i3 = i*3;
-    if(shatterLife[i] > 0){
-      velocities[i3] *= 0.985;
-      velocities[i3+1] *= 0.99;
-      velocities[i3+1] -= 0.035;
-      velocities[i3+2] *= 0.985;
-      positions[i3] += velocities[i3] * dt;
+    // —— 流沙崩解：等待中的粒子仅微微颤动，不参与后续积分 ——
+    if(mode===MODE.SCENE && sceneState===SCENE_STATE.RELEASING && releaseLife[i] > 0){
+      releaseLife[i] -= dt / 60;  // dt 是 60fps 倍数，转秒数
+      const tremor = 0.04;
+      velocities[i3]   += (Math.random()-0.5) * tremor;
+      velocities[i3+1] += (Math.random()-0.5) * tremor * 0.3;
+      velocities[i3+2] += (Math.random()-0.5) * tremor;
+      velocities[i3]   *= 0.85;
+      velocities[i3+1] *= 0.85;
+      velocities[i3+2] *= 0.85;
+      positions[i3]   += velocities[i3] * dt;
       positions[i3+1] += velocities[i3+1] * dt;
       positions[i3+2] += velocities[i3+2] * dt;
-      shatterLife[i] -= 0.0045 * dt;
-      const groundY = scatteredPos[i3+1];
-      if(positions[i3+1] < groundY){
-        positions[i3+1] = groundY;
-        velocities[i3+1] *= -0.15;
-        velocities[i3] *= 0.6; velocities[i3+2] *= 0.6;
-      }
-      if(shatterLife[i] <= 0){
-        shatterLife[i] = 0;
-        scatteredPos[i3] = (Math.random()-0.5)*280;
-        scatteredPos[i3+1] = -10 - Math.pow(Math.random(),1.8)*80 + (Math.random()-0.5)*20;
-        scatteredPos[i3+2] = (Math.random()-0.5)*140 - 20;
-        velocities[i3]=0; velocities[i3+1]=0; velocities[i3+2]=0;
-      }
       continue;
     }
 
-    // 进入场景过渡中：粒子保持静止，不做任何积分
+    // 进入场景过渡中：粒子做轻微呼吸运动（地面散沙微动）
     if(enteringScene){
-      velocities[i3] = 0;
-      velocities[i3+1] = 0;
-      velocities[i3+2] = 0;
+      const breathe = Math.sin(time * 0.4 + seeds[i] * 12) * 0.015;
+      velocities[i3]   += (Math.random()-0.5) * 0.008;
+      velocities[i3+1] += breathe * 0.08;
+      velocities[i3+2] += (Math.random()-0.5) * 0.008;
+      velocities[i3]   *= 0.90;
+      velocities[i3+1] *= 0.90;
+      velocities[i3+2] *= 0.90;
+      positions[i3]   += velocities[i3] * dt;
+      positions[i3+1] += velocities[i3+1] * dt;
+      positions[i3+2] += velocities[i3+2] * dt;
       continue;
     }
 
@@ -1566,13 +1881,9 @@ function tick(){
         tz_ = coord.anchor.z + rz * (1 + pulse * 0.6);
         ty_ += pulse * 2.0; // 脉动时微微浮起
       }
-      // HELD / FORMED 态弦振动
-      if(mode===MODE.SCENE && (sceneState===SCENE_STATE.HELD || sceneState===SCENE_STATE.FORMED) && roles[i]>=1 && roles[i]<=4){
-        const r = roles[i];
-        const amp = 0.4 + r*0.15;
-        tx_ += Math.sin(time*8 + r*1.3 + ty_*0.08) * amp;
-        tz_ += Math.cos(time*8 + r*1.3 + ty_*0.08) * amp * 0.6;
-      }
+      // 注：原来此处有"HELD/FORMED 态弦振动"，让 roles=1~4 的弦区粒子按 sin/cos 抖动，
+      // 视觉上像 4 根波动的琴弦。但它会在琴颈中心形成一缕飘动的"沙流"，破坏主体形态，
+      // 所以已移除——弦区粒子现在静止地作为琴颈的一部分。
     } else {
       // RELEASING 或散落状态 → 回到地面散落位置
       tx_ = scatteredPos[i3]; ty_ = scatteredPos[i3+1]; tz_ = scatteredPos[i3+2];
@@ -1625,44 +1936,73 @@ function tick(){
     velocities[i3+1] *= indDamping;
     velocities[i3+2] *= indDamping;
 
-    /* —— 噪声扰动（已不需要这么强） —— */
-    const n = gathering ? 0.03 : 0.08;
+    /* —— 噪声扰动 —— */
+    const isRel = (mode===MODE.SCENE && sceneState===SCENE_STATE.RELEASING);
+    const n = gathering ? 0.03 : (isRel ? 0.02 : 0.08);
     velocities[i3]   += (Math.random()-0.5)*n;
     velocities[i3+1] += (Math.random()-0.5)*n;
     velocities[i3+2] += (Math.random()-0.5)*n;
 
     if(mode===MODE.SCENE && !gathering && sceneState===SCENE_STATE.RELEASING){
-      /* —— 散落阶段：每个粒子有自己的下落速度（细沙慢，粗沙快） —— */
-      // sizes[i] 范围大约 0.18~1.10，用它作为重力系数
-      const grav = 0.06 + (sizes[i] || 0.4) * 0.18;  // 细沙 0.09 ~ 粗沙 0.26
-      velocities[i3+1] -= grav * slowness;
-      // 横向飘移：慢沙粒飘得多
-      const driftStr = (1 - slowness*0.6) * 0.06;
-      velocities[i3]   += Math.sin(time*0.5 + sd*40) * driftStr + (Math.random()-0.5)*0.03;
-      velocities[i3+2] += Math.cos(time*0.4 + sd*45) * driftStr + (Math.random()-0.5)*0.03;
+      /* —— 流沙崩解：分层延迟 + 风场 + 颗粒分级重力 —— */
+      // releaseLife[i] <= 0：启动下落，颗粒级重力 + 风场飘移
+      // （releaseLife[i] > 0 的微颤动逻辑已在上方提前处理）
+      if(releaseLife[i] <= 0){
+        // 已启动下落：主力是重力（向下），少量横向飘散
+        const grain = sizes[i] || 0.4;
+        // 重力：强且一致（主导下落方向）
+        const grav = 0.12 + grain * 0.25;            // 细沙 0.17 ~ 粗沙 0.37
+        velocities[i3+1] -= grav * slowness;
+
+        // 横向风场（微弱）：仅给少量粒子一点飘散感，不抢重力主导
+        const windFactor = (1.2 - grain) * 0.4;      // 大幅削弱（原 1.6→0.4）
+        const windX = Math.sin(time*0.35 + sd*8) * 0.04
+                    + Math.sin(time*1.7 + sd*30) * 0.015;
+        const windZ = Math.cos(time*0.30 + sd*9) * 0.03
+                    + Math.cos(time*1.5 + sd*28) * 0.01;
+        velocities[i3]   += windX * windFactor + (Math.random()-0.5)*0.012;
+        velocities[i3+2] += windZ * windFactor + (Math.random()-0.5)*0.012;
+
+        // 细沙偶尔被气流微微卷起（极少量）
+        if(grain < 0.25 && Math.random() < 0.02){
+          velocities[i3+1] += 0.03;
+        }
+      }
     }
 
     positions[i3]   += velocities[i3] * dt;
     positions[i3+1] += velocities[i3+1] * dt;
     positions[i3+2] += velocities[i3+2] * dt;
 
-    /* —— 落地处理：扬起尘埃 —— */
+    /* —— 落地处理：颗粒分级反弹 + 扬尘 —— */
     if(mode===MODE.SCENE && sceneState===SCENE_STATE.RELEASING){
       const groundY = scatteredPos[i3+1];
       if(positions[i3+1] < groundY){
-        const impactSpeed = -velocities[i3+1];  // 落地前的下落速度
+        const impactSpeed = -velocities[i3+1];
+        const grain = sizes[i] || 0.4;
         positions[i3+1] = groundY + (Math.random()-0.5)*0.5;
 
-        // 高速撞击 → 反弹起一阵尘（少量粒子向上飞）
-        if(impactSpeed > 0.6 && Math.random() < 0.10){
-          velocities[i3+1] = impactSpeed * 0.55;  // 反向弹起
-          velocities[i3]   += (Math.random()-0.5) * 0.6;
-          velocities[i3+2] += (Math.random()-0.5) * 0.6;
+        if(grain > 0.55 && impactSpeed > 0.5){
+          // 粗沙重击：高几率反弹起一阵尘（尘会被横向风带走）
+          if(Math.random() < 0.18){
+            velocities[i3+1] = impactSpeed * 0.45;
+            velocities[i3]   += (Math.random()-0.5) * 0.8;
+            velocities[i3+2] += (Math.random()-0.5) * 0.8;
+          } else {
+            velocities[i3+1] *= -0.10;
+            velocities[i3]   *= 0.55;     // 沿地面滑一下
+            velocities[i3+2] *= 0.55;
+          }
+        } else if(grain < 0.30){
+          // 细沙：完全停下（飘到哪里就停哪里），不反弹
+          velocities[i3+1] = 0;
+          velocities[i3]   *= 0.20;
+          velocities[i3+2] *= 0.20;
         } else {
-          // 普通落地：吸收能量
+          // 中等颗粒：温和反弹
           velocities[i3+1] *= -0.08;
-          velocities[i3]   *= 0.4;
-          velocities[i3+2] *= 0.4;
+          velocities[i3]   *= 0.40;
+          velocities[i3+2] *= 0.40;
         }
       }
     }
@@ -1670,8 +2010,21 @@ function tick(){
 
   posAttr.needsUpdate = true;
 
+  // —— 琴的 Y 轴慢速旋转：仅在沙雕态（HELD/FORMED）启用 ——
+  // RELEASING：冻结旋转角度（松手瞬间朝向不变，粒子原地崩散）
+  // 其他非旋转态：缓慢归零，为下次聚合准备
+  const rotating = (mode === MODE.SCENE) &&
+                   (sceneState === SCENE_STATE.HELD || sceneState === SCENE_STATE.FORMED);
+  const releasing = (mode === MODE.SCENE) && (sceneState === SCENE_STATE.RELEASING);
   if(mode !== MODE.MAP){
-    points.rotation.y += (0 - points.rotation.y) * 0.03;
+    if(rotating){
+      points.rotation.y += 0.0070 * dt;
+    } else if(releasing){
+      // 冻结：什么都不做，保持松手瞬间的角度
+    } else {
+      // 聚合中/IDLE：缓慢归零
+      points.rotation.y += (0 - points.rotation.y) * 0.03;
+    }
   } else {
     points.rotation.y = 0;
   }
