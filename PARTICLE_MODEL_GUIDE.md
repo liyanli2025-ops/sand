@@ -718,3 +718,73 @@ const MODEL_URL = 'https://mat1.gtimg.com/qqcdn/redian/sand_test/model_compresse
 - [ ] deploy 脚本部署 HTML/JS/CSS
 - [ ] 手动上传：压缩 GLB + draco 原始文件名版本
 - [ ] app.js 中 GLB URL 改为绝对 CDN 路径
+
+---
+
+## 14. CSS Bloom 辉光效果
+
+### 背景
+
+参考花朵粒子效果图，分析出拟真感的核心视觉层次：
+1. 核心实体粒子（已有）
+2. 高亮轮廓光 / rim light
+3. 粒子发散云
+4. **氛围辉光（bloom）**
+5. 深黑背景反差
+
+### 方案选择
+
+#### ❌ Three.js EffectComposer + UnrealBloomPass（已放弃）
+
+尝试过从 three@0.146.0（与项目 three.min.js 版本匹配）提取以下文件：
+- `CopyShader.js`、`LuminosityHighPassShader.js`
+- `ShaderPass.js`、`RenderPass.js`
+- `EffectComposer.js`、`UnrealBloomPass.js`
+
+**放弃原因**：`EffectComposer` 渲染到内部 renderTarget 时会覆盖 canvas 的 alpha 通道，导致 CSS 背景图（`.scene-bg`）被黑色遮挡。项目的视觉架构依赖 `alpha:true` 的透明 canvas 叠在 CSS 背景上，与 EffectComposer 的设计冲突。
+
+#### ✅ CSS filter 模拟 bloom（当前方案）
+
+在主 canvas 上方叠加一个辅助 canvas，用 CSS `mix-blend-mode:screen` + `filter:blur(8px) brightness(1.5)` 模拟辉光扩散。
+
+**优点**：
+- 零侵入 Three.js 渲染管线
+- 不影响 canvas alpha 透明
+- CSS 背景正常显示
+- 性能可控（每 2 帧刷新一次）
+
+**缺点**：
+- 不是真正的高通过滤（无法只对亮部做 bloom）
+- 效果不如 UnrealBloomPass 精确
+
+### 实现
+
+```js
+// app.js — initBloom()
+const bloomLayer = document.createElement('canvas');
+bloomLayer.style.cssText = `
+  position:fixed; inset:0; z-index:2;
+  pointer-events:none; opacity:0;
+  mix-blend-mode:screen;
+  filter:blur(8px) brightness(1.5);
+`;
+document.body.appendChild(bloomLayer);
+
+// 每 2 帧把主 canvas 内容复制到 bloom 层
+function renderBloom(){
+  ctx.clearRect(0, 0, w, h);
+  ctx.globalAlpha = 0.7;
+  ctx.drawImage(canvas, 0, 0);
+}
+
+// 渲染循环中根据 sculptVal 控制 bloom 层 opacity
+// sculptVal > 0.5（沙雕态）→ opacity 渐变到 0.55
+// 其他态 → opacity 渐变到 0
+```
+
+### 后续优化方向
+
+如果需要更强的辉光效果，可以尝试：
+1. **选择性 bloom**：用 `OffscreenCanvas` + WebGL 单独渲染亮部粒子，再叠加
+2. **双 canvas 架构**：一个 canvas 专门渲染不透明的沙雕态（可以用 EffectComposer），另一个 canvas 渲染透明的地面/地图态
+3. **shader 内 bloom 近似**：在 fragment shader 中对邻近 UV 采样模拟高斯模糊（性能开销大）

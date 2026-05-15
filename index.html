@@ -2,14 +2,43 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>聚不起的沙 · 伊朗·100天</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&family=Noto+Serif+SC:wght@300;400&display=swap" rel="stylesheet">
+
 <link rel="stylesheet" href="./style.css">
 </head>
-<body class="map-mode">
+<body class="splash-mode">
+
+<!-- ======== 开屏页 ======== -->
+<div class="splash" id="splash">
+  <video class="splash-video" id="splashVideo"
+    autoplay muted loop playsinline webkit-playsinline
+    preload="auto"
+    src="https://mat1.gtimg.com/qqcdn/redian/sand_test/start.mp4"></video>
+  <div class="splash-overlay"></div>
+  <div class="splash-content">
+    <div class="splash-tag">OPERATION · <b>IRAN</b> · 2026</div>
+    <div class="splash-title-zh">聚 不 起 的 沙</div>
+    <div class="splash-title-en">THE SAND THAT CANNOT BE GATHERED</div>
+    <div class="splash-desc">
+      100 天，伊朗在消失。<br>
+      6 个瞬间，每一个都触手可及，每一个都留不住。
+    </div>
+    <div class="splash-enter" id="splashEnter">
+      <span class="splash-enter-line"></span>
+      <span class="splash-enter-text">触碰进入</span>
+      <span class="splash-enter-line"></span>
+    </div>
+    <div class="splash-footer">
+      <span class="splash-date">2026.03.20 — 06.28</span>
+      <span class="splash-sep">·</span>
+      <span class="splash-fa">ایران</span>
+    </div>
+  </div>
+</div>
 
 <div class="archive" id="mapArchive">
   <div class="tag">
@@ -29,7 +58,7 @@
   <div class="right tag" id="sceneArchiveR"><em>—</em><br>—<br>—</div>
 </div>
 
-<div class="back-btn" id="backBtn" title="return to map">
+<div class="back-btn" id="backBtn" title="return to map" style="display:none">
   <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
 </div>
 
@@ -73,8 +102,8 @@
   press &amp; hold <span class="dot"></span><span class="dot"></span><span class="dot"></span>
 </div>
 
-<!-- 微型沙盘（右上角） -->
-<div class="mini-sandbox" id="miniSandbox">
+<!-- 微型沙盘（右上角）- 已隐藏 -->
+<div class="mini-sandbox" id="miniSandbox" style="display:none">
   <canvas id="miniSandboxCanvas" width="140" height="140"></canvas>
   <div class="mini-sandbox-label">FIELD MAP</div>
 </div>
@@ -94,9 +123,14 @@
   </div>
 </div>
 
+<!-- 碎裂闪光 overlay -->
+<div class="shatter-flash" id="shatterFlash"></div>
+<!-- 光柱（灵魂升腾） -->
+<div class="shatter-beam" id="shatterBeam"></div>
+
 <div class="press-bar"><div class="fill" id="pressFill"></div></div>
 
-<div class="next-hint" id="nextHint">return to map <span class="arrow">↵</span></div>
+<div class="next-hint" id="nextHint">continue <span class="arrow">→</span></div>
 
 <!-- iOS 陀螺仪授权 -->
 <div class="gyro-ask" id="gyroAsk">
@@ -118,6 +152,15 @@
 <script src="./DRACOLoader.js"></script>
 <script src="./GLTFLoader.js"></script>
 <script src="./MeshSurfaceSampler.js"></script>
+<!-- bloom JS 暂时移除诊断 -->
+<!--
+<script src="./CopyShader.js"></script>
+<script src="./LuminosityHighPassShader.js"></script>
+<script src="./EffectComposer.js"></script>
+<script src="./ShaderPass.js"></script>
+<script src="./RenderPass.js"></script>
+<script src="./UnrealBloomPass.js"></script>
+-->
 <script src="./app.js"></script>
 </body>
 </html>
