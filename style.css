@@ -484,6 +484,44 @@ body.map-mode .coord-labels{opacity:1;}
 .story-card.show p:nth-child(6){transition-delay:2.2s;}
 .story-card.show p:nth-child(7){transition-delay:2.6s;}
 .story-card p.quiet{color:var(--ink-dim);font-style:italic;font-size:11.5px;}
+
+/* —— 崩坏态 story-card：冷暗焦褐色调，与全景图整体一致（无鲜艳橙红） —— */
+.story-card.collapse-story .story-card-inner{
+  background:rgba(14,10,8,0.94);
+  border:1px solid rgba(120,90,70,0.22);
+  box-shadow:0 8px 40px rgba(0,0,0,0.75), inset 0 1px 0 rgba(180,150,120,0.06);
+}
+.story-card.collapse-story .card-title{
+  color:#c8b8a4;
+}
+.story-card.collapse-story .card-subtitle{
+  color:#a89684;
+  border-bottom-color:rgba(120,90,70,0.28);
+}
+.story-card.collapse-story .card-subtitle em{color:#75604f;}
+/* 关键：崩坏态下，p 不再走"容器 .show 就全显"的规则，每个 <p> 必须自己有 .show 才显示 */
+.story-card.collapse-story.show p{
+  opacity:0;transform:translateY(10px);
+  transition:opacity 1.4s ease, transform 1.4s ease;
+}
+.story-card.collapse-story.show p.show{
+  opacity:.92;transform:translateY(0);
+}
+.story-card.collapse-story p{
+  color:#d8c8b4;
+}
+.story-card.collapse-story p.quiet{
+  color:#998472;font-style:italic;font-size:11.5px;
+}
+/* 取消 nth-child 的全局延迟（让 JS 控制节奏） */
+.story-card.collapse-story.show p:nth-child(3),
+.story-card.collapse-story.show p:nth-child(4),
+.story-card.collapse-story.show p:nth-child(5),
+.story-card.collapse-story.show p:nth-child(6),
+.story-card.collapse-story.show p:nth-child(7){
+  transition-delay:0s;
+}
+.story-card.collapse-story .card-icon svg{stroke:#a89684;}
 .story-card .card-icon{
   text-align:center;margin-top:14px;
   opacity:0;transition:opacity 1.2s ease 2.8s;
@@ -614,17 +652,41 @@ body.scene-mode .press-bar{opacity:1;}
 .next-hint{
   position:fixed;bottom:30px;right:24px;z-index:21;
   font-family:'Cormorant Garamond',serif;
-  font-size:10px;letter-spacing:.32em;
+  font-size:13px;letter-spacing:.32em;
   color:var(--gold);text-transform:uppercase;
   opacity:0;transition:opacity 1s ease;
   cursor:pointer;pointer-events:auto;
-  padding:6px 0;
+  padding:8px 14px;
+  border:1px solid rgba(212,165,116,0.32);
+  border-radius:2px;
+  background:rgba(0,0,0,0.32);
+  text-shadow:0 1px 4px rgba(0,0,0,0.7);
   display:none;
 }
-.next-hint.show{display:block;opacity:.75;}
-.next-hint:hover{opacity:1;}
-.next-hint .arrow{display:inline-block;margin-left:8px;transition:transform .3s;}
+/* 出现后做呼吸动画：opacity 0.7↔1，2.4s 一次循环，引导用户注意 */
+.next-hint.show{
+  display:inline-block;
+  animation:nextHintPulse 2.4s ease-in-out infinite;
+}
+.next-hint:hover{
+  opacity:1 !important;
+  border-color:rgba(212,165,116,0.6);
+  background:rgba(0,0,0,0.5);
+  animation-play-state:paused;
+}
+@keyframes nextHintPulse{
+  0%,100%{ opacity:0.72; box-shadow:0 0 0 0 rgba(212,165,116,0); }
+  50%    { opacity:1.0;  box-shadow:0 0 14px 0 rgba(212,165,116,0.32); }
+}
+.next-hint .arrow{
+  display:inline-block;margin-left:8px;
+  transition:transform .3s;
+  /* 金色小圆点替换为更明显的箭头 */
+}
 .next-hint:hover .arrow{transform:translateX(4px);}
+@media (max-width:600px){
+  .next-hint{ font-size:12px; bottom:24px; right:18px; padding:7px 12px; }
+}
 
 /* 占位场景 */
 .placeholder{
@@ -726,4 +788,219 @@ body.scene-mode .press-bar{opacity:1;}
     width:100px;height:100px;
   }
   .mini-sandbox canvas{width:100px;height:100px;}
+}
+
+/* ===================================================================
+   Tabriz 场景：4 段视频 · 巴扎作坊（猫拆地毯）
+   V1 推进 → V2 待机循环 → V3 触发 → V4 崩坏渐黑
+   =================================================================== */
+
+/* 整层根容器：默认隐藏，进入 Tabriz 场景时 .show 显示 */
+.tabriz-scene-root{
+  position:fixed; inset:0; z-index:115;
+  background:#000;
+  display:none;
+  overflow:hidden;
+  opacity:1;
+}
+.tabriz-scene-root.show{ display:block; }
+.tabriz-scene-root.fade-out{
+  opacity:0;
+  transition:opacity 0.5s ease;
+  pointer-events:none;
+}
+
+/* 单个视频元素：全屏铺满。完全对齐 .splash-video 的极简写法 —
+   微信安卓 WebView 对 video 元素的任何 opacity/visibility 切换都可能引发原生层重排，
+   因此这里默认就直接显示，不做任何过渡。 */
+.tabriz-video{
+  position:absolute; inset:0;
+  width:100%; height:100%;
+  object-fit:cover;
+  background:#000;
+  pointer-events:none;
+}
+/* 兼容旧的 .active 类（保留无害） */
+.tabriz-video.active{ opacity:1; visibility:visible; }
+/* 容器需要 overflow:hidden 以裁掉超出部分 */
+.tabriz-scene-root{ overflow:hidden; }
+/* z-index 分层（单视频模式下其实只有 V1 在用，V2~V5 已 display:none） */
+.tabriz-v1{ z-index:1; }
+.tabriz-v2{ z-index:2; }
+.tabriz-v3{ z-index:3; }
+.tabriz-v4{ z-index:4; }
+.tabriz-v5{ z-index:5; }
+
+/* 暗角 + 暖光晕：叠在视频之上，文案之下 */
+.tabriz-vignette{
+  position:absolute; inset:0;
+  z-index:10;
+  pointer-events:none;
+  opacity:0;
+  transition:opacity 1.0s ease;
+  background:
+    radial-gradient(ellipse at center,
+      rgba(255,180,90,0.08) 0%,
+      rgba(255,160,70,0.04) 20%,
+      rgba(0,0,0,0) 45%
+    ),
+    radial-gradient(ellipse at center,
+      rgba(0,0,0,0) 40%,
+      rgba(0,0,0,0.30) 75%,
+      rgba(0,0,0,0.65) 100%
+    );
+}
+.tabriz-scene-root.show .tabriz-vignette{ opacity:1; }
+
+/* 旧的 caption 占位 DOM 保留兼容，但完全隐藏（叙事改走专用字幕条 .tabriz-subtitle） */
+.tabriz-caption{ display:none !important; }
+
+/* ===== Tabriz 字幕条：底部居中，纯文字 + text-shadow（无暗框）=====
+   一句一句出现，对齐视频剧情时刻。每句独立 .tabriz-subtitle-line，
+   通过 .show 触发 0.6s 淡入；移除 .show 后 0.6s 淡出。 */
+.tabriz-subtitle{
+  position:absolute;
+  left:50%;
+  bottom:14%;
+  transform:translateX(-50%);
+  z-index:25;
+  width:90vw;
+  max-width:560px;
+  text-align:center;
+  pointer-events:none;
+  /* 容器本身常驻，靠子节点 .tabriz-subtitle-line 切换 */
+}
+.tabriz-subtitle-line{
+  display:block;
+  font-family:'Noto Serif SC','Songti SC','SimSun',serif;
+  font-size:17px;
+  letter-spacing:0.05em;
+  line-height:1.6;
+  color:#f4e8cc;
+  /* 多层墨色阴影：在视频/全景上保证可读，无需暗框 */
+  text-shadow:
+    0 1px 2px rgba(0,0,0,0.95),
+    0 2px 6px rgba(0,0,0,0.85),
+    0 0 18px rgba(0,0,0,0.6),
+    0 0 32px rgba(0,0,0,0.4);
+  opacity:0;
+  transform:translateY(8px);
+  transition:opacity 0.7s ease, transform 0.7s ease;
+  /* 同时位于一个容器里，但同一时刻只一两条 .show，避免视觉拥挤 */
+  position:absolute;
+  left:0; right:0;
+  bottom:0;
+}
+.tabriz-subtitle-line.show{
+  opacity:0.97;
+  transform:translateY(0);
+}
+/* quiet 行：日期、转折等次要信息（小一号 + 偏灰） */
+.tabriz-subtitle-line.quiet{
+  font-size:14px;
+  color:#c8b89c;
+  font-style:italic;
+  letter-spacing:0.08em;
+}
+/* 移动端微调 */
+@media (max-width:600px){
+  .tabriz-subtitle{ bottom:18%; max-width:92vw; }
+  .tabriz-subtitle-line{ font-size:15px; line-height:1.55; }
+  .tabriz-subtitle-line.quiet{ font-size:12.5px; }
+}
+
+/* ===== V5 期间视频逐渐模糊 ===== */
+.tabriz-video{
+  transition:filter 14s linear, opacity 1.5s ease;
+}
+.tabriz-video.v5-blur{
+  filter:blur(18px) brightness(0.55) saturate(0.7);
+}
+
+/* 猫爪点击热区：V2 loop 期间显示
+   位置：屏幕右下 22% × 28% 区域（竖屏下猫爪所在）
+   视觉：呼吸光环 + 文字提示，引导用户点击 */
+/* 猫爪点击热区：定位到画面"前左爪"中心（伸向毛线球的那只）
+   位置：横向 30% / 纵向 60%（圆心，translate -50% 居中），匹配 V3 视频中爪子位置
+   视觉：呼吸光环 + 文字提示，引导用户点击 */
+.tabriz-paw-hint{
+  position:absolute;
+  left:30%; top:60%;
+  transform:translate(-50%, -50%);
+  width:22vw; height:22vw;
+  max-width:140px; max-height:140px;
+  z-index:30;
+  cursor:pointer;
+  opacity:0;
+  transition:opacity 0.8s ease;
+  pointer-events:none;
+  display:flex;
+  align-items:center; justify-content:center;
+  flex-direction:column;
+}
+.tabriz-paw-hint.show{
+  opacity:1;
+  pointer-events:auto;
+}
+.tabriz-paw-hint .paw-ring{
+  position:absolute;
+  inset:0;
+  border-radius:50%;
+  border:1.2px solid rgba(232,212,168,0.55);
+  box-shadow:
+    0 0 18px rgba(255,180,90,0.25) inset,
+    0 0 22px rgba(255,180,90,0.20);
+  animation:tabrizPawBreath 2.2s ease-in-out infinite;
+}
+.tabriz-paw-hint .paw-label{
+  position:absolute;
+  top:108%;
+  left:50%;
+  transform:translateX(-50%);
+  font-family:'Noto Serif SC','Songti SC',serif;
+  font-size:11px;
+  letter-spacing:0.28em;
+  color:rgba(232,212,168,0.85);
+  text-transform:lowercase;
+  white-space:nowrap;
+  text-shadow:0 0 10px rgba(0,0,0,0.85);
+  animation:tabrizPawLabelBreath 3.4s ease-in-out infinite;
+}
+@keyframes tabrizPawBreath{
+  0%,100%{ transform:scale(1.0); opacity:0.55; }
+  50%{ transform:scale(1.12); opacity:0.95; }
+}
+@keyframes tabrizPawLabelBreath{
+  0%,100%{ letter-spacing:0.28em; opacity:0.75; }
+  50%{ letter-spacing:0.34em; opacity:1.0; }
+}
+
+/* 黑屏淡出层：V4 末帧 → 下一页 */
+.tabriz-fadeout{
+  position:absolute; inset:0;
+  z-index:40;
+  background:#000;
+  opacity:0;
+  pointer-events:none;
+  transition:opacity 1.2s ease;
+}
+.tabriz-fadeout.show{ opacity:1; }
+
+/* 入场黑场层：进入 Tabriz 时盖住整个画面（V1 已经在播放但被遮住），
+   playing 事件触发后移除 .show → opacity:0，做出"黑场已经在动"的渐显。
+   transition 比 fadeout 短一点，用 ease-out 让黑色快速消散、画面慢慢显出。 */
+.tabriz-fadein{
+  position:absolute; inset:0;
+  z-index:39;
+  background:#000;
+  opacity:0;
+  pointer-events:none;
+  transition:opacity 0.8s ease-out;
+}
+.tabriz-fadein.show{ opacity:1; }
+
+/* 移动端文案缩小 */
+@media (max-width:600px){
+  .tabriz-paw-hint{ left:30%; top:60%; width:28vw; height:28vw; }
+  .tabriz-paw-hint .paw-label{ font-size:10px; }
 }

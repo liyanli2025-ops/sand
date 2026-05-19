@@ -76,7 +76,7 @@ const AMBIENT_COUNT = isMobile ? 1000 : 1800;
 
 /* ---------- 通用模型管理：按场景 ID 加载不同 GLB ---------- */
 const _isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-const _CDN = 'https://mat1.gtimg.com/qqcdn/redian/sand_test/';
+const _CDN = 'https://mat1.gtimg.com/qqcdn/redian/sand/';
 const MODELS = {
   golestan: {
     url: _isLocal ? './chandelier_compressed.glb' : _CDN + 'chandelier_compressed.glb',
@@ -99,6 +99,17 @@ const MODELS = {
     targetHeight: 95,
     tiltZ: 12, tiltX: -15,
     yOffset: 50,
+  },
+  // 场景 2 · 大不里士地毯作坊（纯视频驱动，无 3D 几何）
+  tabriz: {
+    url: null,                 // 标记为程序化场景，不需要加载 GLB
+    sampledPoints: null, loading: false, loadFailed: false,
+    targetHeight: 0,
+    tiltZ: 0, tiltX: 0,
+    yOffset: 0,
+    procedural: true,          // 程序化场景标记（兼容旧入口判断）
+    videoReady: false,         // 视频 DOM 是否已初始化
+    active: false,             // 是否当前正在演出（用于 cleanup 判断，等价旧的 sceneGroup 非空）
   }
 };
 // 兼容旧变量名（大量旧代码引用）
@@ -111,6 +122,11 @@ function loadModelForScene(sceneId){
   const mdl = MODELS[sceneId];
   if(!mdl) return;
   if(mdl.sampledPoints || mdl.loading || mdl.loadFailed) return;
+  // 程序化场景（如 tabriz 地毯作坊）不需要加载 GLB，标记 sampledPoints 为占位以阻止重复尝试
+  if(mdl.procedural){
+    mdl.sampledPoints = []; // 占位：表示"已就绪"，不会再走 loader
+    return;
+  }
   if(typeof THREE.GLTFLoader === 'undefined' || typeof THREE.MeshSurfaceSampler === 'undefined'){
     console.warn('[model] GLTFLoader 或 MeshSurfaceSampler 未加载');
     mdl.loadFailed = true;
@@ -386,7 +402,7 @@ function mergeMeshGeometries(meshes){
 
 // 启动模型预加载（首屏就开始下，进场景前大概率已就绪）
 loadModelForScene('golestan');
-loadModelForScene('tehran');
+loadModelForScene('tabriz');  // 程序化场景，loadModelForScene 内部跳过 GLB 加载
 
 /* ---------- 渲染器 ---------- */
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:false, alpha:true, powerPreference:'high-performance' });
@@ -479,14 +495,106 @@ panoDimSphere.renderOrder = -10;  // 确保在粒子之前渲染
 panoDimSphere.visible = false;    // 默认隐藏，进场景时显示
 scene.add(panoDimSphere);
 
+/* ---------- 全景图烧灼层（吊灯崩塌时触发；BackSide 球壳 + fbm 焦化 shader） ---------- */
+const panoBurnSphere = new THREE.Mesh(
+  new THREE.SphereGeometry(1190, 64, 32),
+  new THREE.ShaderMaterial({
+    uniforms: {
+      uProgress: { value: -0.2 },   // -0.2 完全未燃烧；1.2 完全焦黑
+      uTime:     { value: 0 },
+      // 烧灼方向 uniform（场景定制）：默认 (0,1,0) 表示从穹顶（上方）开始向下蔓延
+      // 玫瑰宫：(0, 1, 0)；地毯/巴扎作坊：(0, -1, 0) 从地面向上吞没
+      uBurnDir:  { value: new THREE.Vector3(0, 1, 0) },
+    },
+    vertexShader: `
+      varying vec3 vDir;
+      void main(){
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uProgress;
+      uniform float uTime;
+      uniform vec3  uBurnDir;
+      varying vec3 vDir;
+      // 3D hash + value noise（直接用方向向量采样，避免 equirect 接缝/平面感）
+      float hash3(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+      float vnoise3(vec3 p){
+        vec3 i = floor(p), f = fract(p);
+        vec3 u = f * f * (3.0 - 2.0 * f);
+        float n000 = hash3(i + vec3(0,0,0));
+        float n100 = hash3(i + vec3(1,0,0));
+        float n010 = hash3(i + vec3(0,1,0));
+        float n110 = hash3(i + vec3(1,1,0));
+        float n001 = hash3(i + vec3(0,0,1));
+        float n101 = hash3(i + vec3(1,0,1));
+        float n011 = hash3(i + vec3(0,1,1));
+        float n111 = hash3(i + vec3(1,1,1));
+        return mix(
+          mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+          mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y),
+          u.z
+        );
+      }
+      float fbm3(vec3 p){
+        float v = 0.0, a = 0.5;
+        for(int i = 0; i < 5; i++){
+          v += a * vnoise3(p);
+          p *= 2.0; a *= 0.5;
+        }
+        return v;
+      }
+      void main(){
+        // 用方向向量在 3D 空间采样：焦斑天然分布在球面、有"立体腐蚀"感、无接缝
+        vec3 p = vDir * 2.4;
+        // 缓慢的体积流动（让焦斑像在"呼吸"）
+        float n = fbm3(p + vec3(0.0, uTime * 0.03, uTime * 0.02));
+        // 加一层细密的高频纹路，模拟焦痕/裂纹的不规则边缘
+        n += 0.22 * fbm3(p * 4.5 - vec3(uTime * 0.05, 0.0, uTime * 0.04));
+        n = clamp(n, 0.0, 1.0);
+
+        // —— 关键：让烧灼从指定方向（uBurnDir）开始向反方向蔓延 ——
+        // vDir 是球面上某点指向方向，uBurnDir 是"火源方向"
+        // dot(vDir, uBurnDir) ∈ [-1, 1]：1=朝着火源、-1=背对
+        // 玫瑰宫 uBurnDir=(0,1,0)：穹顶先烧（向下蔓延）
+        // 地毯/作坊 uBurnDir=(0,-1,0)：地面先烧（向上吞没）
+        float topBias = clamp(dot(vDir, uBurnDir) * 0.5 + 0.5, 0.0, 1.0);
+        float n2 = n - topBias * 0.30;
+
+        // burn=0 透明（露出原全景），burn=1 完全覆盖
+        float burn = 1.0 - smoothstep(uProgress - 0.06, uProgress + 0.20, n2);
+
+        // —— 焦色：与全景图整体暗调一致（深褐+冷灰），无鲜艳橙色 ——
+        // 边缘略带焦痕暖褐（远低于之前的橙红），核心是近黑的冷褐
+        vec3 charredCore = vec3(0.015, 0.012, 0.010);    // 接近全黑的冷褐
+        vec3 charredEdge = vec3(0.085, 0.055, 0.040);    // 焦痕的暗褐过渡
+        vec3 col = mix(charredEdge, charredCore, burn);
+
+        // 透明度：burn 决定覆盖强度
+        float a = burn * 0.97;
+        gl_FragColor = vec4(col, a);
+      }
+    `,
+    transparent: true,
+    side: THREE.BackSide,
+    depthWrite: false,
+    depthTest: false,
+    fog: false,
+  })
+);
+panoBurnSphere.renderOrder = -9;  // 介于 dimSphere(-10) 与 sparkleGroup(-5) 之间
+panoBurnSphere.visible = false;
+scene.add(panoBurnSphere);
+
 /* ---------- 全景图水晶反光光点（随视角切换闪烁） ---------- */
 const sparkleGroup = new THREE.Group();
 sparkleGroup.visible = false;
 sparkleGroup.renderOrder = -5;
 scene.add(sparkleGroup);
 
-// —— A. 密集小光点（球面分布，约 120 颗）——
-const SPARKLE_COUNT = 120;
+// —— A. 密集小光点（球面分布，约 260 颗）——
+const SPARKLE_COUNT = 260;
 const SPARKLE_RADIUS = 900;
 const sparkleGeo = new THREE.BufferGeometry();
 const sparklePos = new Float32Array(SPARKLE_COUNT * 3);
@@ -512,7 +620,11 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
   sparkleDir[i*3+1] = -ny;
   sparkleDir[i*3+2] = -nz;
   sparkleSeed[i] = Math.random() * 100;
-  sparkleSize[i] = 8 + Math.random() * 18;
+  // 缩小：三档尺寸混合（之前 12~60，现在 6~24，且偏小）
+  const r = Math.random();
+  if(r < 0.15)      sparkleSize[i] = 16 + Math.random() * 8;    // 大颗（15%）
+  else if(r < 0.55) sparkleSize[i] = 10 + Math.random() * 6;    // 中颗（40%）
+  else              sparkleSize[i] = 5 + Math.random() * 5;     // 小颗（45%）
 }
 sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
 sparkleGeo.setAttribute('aDir',     new THREE.BufferAttribute(sparkleDir, 3));
@@ -523,8 +635,8 @@ const sparkleMat = new THREE.ShaderMaterial({
   uniforms: {
     uTime:       { value: 0 },
     uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
-    uMap:        { value: null }, // 延迟赋值，crystalTex 还未创建
     uOpacity:    { value: 0 },
+    uMotion:     { value: 0 },  // 0=静止, 1=快速转动
   },
   vertexShader: `
     attribute vec3 aDir;
@@ -532,31 +644,74 @@ const sparkleMat = new THREE.ShaderMaterial({
     attribute float aSize;
     uniform float uTime;
     uniform float uPixelRatio;
+    uniform float uMotion;
     varying float vAlpha;
+    varying float vFlash;
     void main(){
       vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-      vec3 viewDir = normalize(position - cameraPosition);
-      float facing = clamp(dot(viewDir, normalize(aDir)) * 0.5 + 0.5, 0.0, 1.0);
-      facing = pow(facing, 3.0);
-      float twinkle = 0.55 + 0.45 * sin(uTime * 1.6 + aSeed * 6.2831);
-      vAlpha = facing * twinkle;
-      gl_PointSize = aSize * uPixelRatio * (300.0 / -mvPos.z);
+      vec3 dirView = normalize((modelViewMatrix * vec4(aDir, 0.0)).xyz);
+      vec3 toCamView = normalize(-mvPos.xyz);
+      float facing = clamp(dot(dirView, toCamView) * 0.5 + 0.5, 0.0, 1.0);
+      facing = pow(facing, 1.4);
+
+      // 慢速基础闪烁（每颗节奏不同）
+      float twinkle = 0.55 + 0.45 * sin(uTime * 1.8 + aSeed * 6.2831);
+      // 快速尖脉冲
+      float fast = sin(uTime * 5.2 + aSeed * 12.57);
+      float flash = pow(max(fast, 0.0), 6.0);
+      vFlash = flash * uMotion; // 尖闪也只在运动时出现
+
+      // 总亮度 = facing * twinkle * 运动强度
+      // 静止时 uMotion≈0 → vAlpha≈0 → 几乎不可见
+      vAlpha = facing * twinkle * uMotion;
+
+      // 闪光瞬间放大颗粒（仅运动时）
+      float sizeBoost = 1.0 + vFlash * 0.8;
+      gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0));
+      gl_PointSize = max(gl_PointSize, 4.0);
       gl_Position = projectionMatrix * mvPos;
     }
   `,
   fragmentShader: `
-    uniform sampler2D uMap;
     uniform float uOpacity;
     varying float vAlpha;
+    varying float vFlash;
     void main(){
-      vec4 tex = texture2D(uMap, gl_PointCoord);
-      vec3 col = mix(vec3(1.0, 0.92, 0.78), vec3(1.0, 1.0, 1.0), vAlpha);
-      gl_FragColor = vec4(col, tex.a * vAlpha * uOpacity);
-      if(gl_FragColor.a < 0.01) discard;
+      vec2 uv = gl_PointCoord - 0.5;
+      float r = length(uv);
+      if(r > 0.5) discard;
+
+      // 1) 圆形核心 —— 强高斯衰减让边缘柔和
+      //    系数 60：在 r=0.18 处衰减到约 14%，r=0.3 时约 0.5% → 几乎只剩中心一点
+      float core = exp(-r * r * 60.0);
+      // 2) 柔光晕（更广但更弱的高斯）
+      float halo = exp(-r * r * 12.0) * 0.35;
+
+      // 3) 十字星芒：变细、变软（仅在 flash 时显形，平时几乎看不见）
+      //    使用更软的衰减；并且不在边缘硬切，靠 r 包络让芒尖柔化
+      float crossH = exp(-pow(uv.y * 50.0, 2.0)) * exp(-abs(uv.x) * 3.0);
+      float crossV = exp(-pow(uv.x * 50.0, 2.0)) * exp(-abs(uv.y) * 3.0);
+      float crossLine = max(crossH, crossV);
+      // r 包络：靠近中心强，远端柔和淡出
+      float starEnv = exp(-r * r * 8.0);
+      float star = crossLine * starEnv;
+
+      // 组合：核心 + 柔晕 始终存在，星芒只在 flash 瞬间显著
+      float shape = core + halo + star * (0.25 + vFlash * 1.4);
+
+      vec3 warm = vec3(1.0, 0.94, 0.78);
+      vec3 cool = vec3(1.0, 1.0, 1.0);
+      vec3 col = mix(warm, cool, clamp(vFlash, 0.0, 1.0));
+      col *= 1.0 + vFlash * 0.6;
+
+      float a = shape * vAlpha * uOpacity;
+      if(a < 0.005) discard;
+      gl_FragColor = vec4(col, a);
     }
   `,
   transparent: true,
   depthWrite: false,
+  depthTest: false,
   blending: THREE.AdditiveBlending,
   fog: false,
 });
@@ -564,11 +719,11 @@ const sparklePoints = new THREE.Points(sparkleGeo, sparkleMat);
 sparklePoints.frustumCulled = false;
 sparkleGroup.add(sparklePoints);
 
-// —— B. 大颗星芒（Sprite，约 8 颗）——
-const flareCount = 8;
+// —— B. 大颗星芒（Sprite，约 18 颗）——
+const flareCount = 18;
 const flareSprites = [];
 for(let i = 0; i < flareCount; i++){
-  const u = Math.random(), v = 0.25 + Math.random() * 0.6;
+  const u = Math.random(), v = 0.20 + Math.random() * 0.65;
   const theta = 2 * Math.PI * u;
   const phi = Math.acos(2 * v - 1);
   const sinPhi = Math.sin(phi);
@@ -576,7 +731,7 @@ for(let i = 0; i < flareCount; i++){
   const y = Math.cos(phi) * 850;
   const z = sinPhi * Math.sin(theta) * 850;
   const sprMat = new THREE.SpriteMaterial({
-    map: null, // 延迟赋值
+    map: null, // 延迟赋值（用专用十字星芒贴图）
     color: 0xfff4d0,
     transparent: true, opacity: 0,
     blending: THREE.AdditiveBlending,
@@ -584,15 +739,24 @@ for(let i = 0; i < flareCount; i++){
   });
   const spr = new THREE.Sprite(sprMat);
   spr.position.set(x, y, z);
-  spr.scale.setScalar(80 + Math.random() * 60);
+  // 缩小：从 130~230 → 60~110（约 ½）
+  spr.scale.setScalar(60 + Math.random() * 50);
   spr.userData = {
     dir: new THREE.Vector3(-x, -y, -z).normalize(),
     seed: Math.random() * 100,
     baseScale: spr.scale.x,
+    fastSeed: Math.random() * 100,
   };
   flareSprites.push(spr);
   sparkleGroup.add(spr);
 }
+
+// sparkle 运动状态（模块级，供 animate 循环跨帧记忆）
+let sparkleLastYaw = 0;
+let sparkleLastPitch = 0;
+let sparkleMotion = 0;
+let sparkleInited = false;
+
 
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 3000);
 // 地图模式：相机在上方偏前，俯视朝向地图中心
@@ -663,9 +827,75 @@ function makeCrystalTexture(){
   return tex;
 }
 const crystalTex = makeCrystalTexture();
-// 延迟赋值：将 crystalTex 给反光光点使用
-sparkleMat.uniforms.uMap.value = crystalTex;
-for(const _fs of flareSprites) _fs.material.map = crystalTex;
+// sparklePoints 的小光点 shader 内部已自绘形态，不再需要 uMap
+
+/* ---------- 十字星芒贴图（用于 B 层大颗 flare） ---------- */
+function makeStarFlareTexture(){
+  const size = 256;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const cx = size / 2, cy = size / 2;
+
+  // 1) 中心圆形光晕（更柔的高斯衰减 —— 边缘几乎无可见硬边）
+  const halo = g.createRadialGradient(cx, cy, 0, cx, cy, size * 0.5);
+  halo.addColorStop(0.00, 'rgba(255,255,255,1.0)');
+  halo.addColorStop(0.04, 'rgba(255,250,230,0.85)');
+  halo.addColorStop(0.10, 'rgba(255,240,200,0.45)');
+  halo.addColorStop(0.22, 'rgba(255,225,170,0.18)');
+  halo.addColorStop(0.45, 'rgba(255,225,170,0.04)');
+  halo.addColorStop(1.00, 'rgba(255,225,170,0.0)');
+  g.fillStyle = halo;
+  g.fillRect(0, 0, size, size);
+
+  // 2) 主十字（变细：3.5 → 1.5 像素；并且用 blur 模糊）
+  g.globalCompositeOperation = 'lighter';
+  function drawRay(angleDeg, length, thick, alpha){
+    g.save();
+    g.translate(cx, cy);
+    g.rotate(angleDeg * Math.PI / 180);
+    const grad = g.createLinearGradient(-length, 0, length, 0);
+    grad.addColorStop(0.00, 'rgba(255,250,220,0)');
+    grad.addColorStop(0.35, `rgba(255,250,230,${alpha * 0.2})`);
+    grad.addColorStop(0.48, `rgba(255,250,230,${alpha * 0.7})`);
+    grad.addColorStop(0.50, `rgba(255,255,255,${alpha})`);
+    grad.addColorStop(0.52, `rgba(255,250,230,${alpha * 0.7})`);
+    grad.addColorStop(0.65, `rgba(255,250,230,${alpha * 0.2})`);
+    grad.addColorStop(1.00, 'rgba(255,250,220,0)');
+    g.fillStyle = grad;
+    g.fillRect(-length, -thick / 2, length * 2, thick);
+    g.restore();
+  }
+  // 主十字（变细、稍降亮度）
+  drawRay(0,   size * 0.48, 1.6, 0.85);
+  drawRay(90,  size * 0.48, 1.6, 0.85);
+
+  // 3) 中心针尖（更小、更柔）
+  g.globalCompositeOperation = 'lighter';
+  const peak = g.createRadialGradient(cx, cy, 0, cx, cy, size * 0.06);
+  peak.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+  peak.addColorStop(0.5, 'rgba(255,255,255,0.45)');
+  peak.addColorStop(1.0, 'rgba(255,255,255,0)');
+  g.fillStyle = peak;
+  g.fillRect(0, 0, size, size);
+
+  // 4) 整图轻微模糊（destination-in 一个柔和的圆形 alpha 蒙版 + 模糊）
+  //    Canvas2D 没有原生 blur，用多次 destination-in 平滑边缘
+  g.globalCompositeOperation = 'destination-in';
+  const softMask = g.createRadialGradient(cx, cy, 0, cx, cy, size * 0.5);
+  softMask.addColorStop(0.0, 'rgba(0,0,0,1)');
+  softMask.addColorStop(0.6, 'rgba(0,0,0,0.85)');
+  softMask.addColorStop(0.9, 'rgba(0,0,0,0.2)');
+  softMask.addColorStop(1.0, 'rgba(0,0,0,0)');
+  g.fillStyle = softMask;
+  g.fillRect(0, 0, size, size);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+const starFlareTex = makeStarFlareTexture();
+for(const _fs of flareSprites) _fs.material.map = starFlareTex;
 
 
 /* ================================================================
@@ -696,33 +926,53 @@ const COORDINATES = [
       coord: 'TEHRAN · 35.68°N / 51.42°E',
       day: 'day 1',
       lines: [
-        { text: '卡扎尔王朝用十万面镜片铺满这座厅堂，', quiet:false },
-        { text: '让每一位来客都能从四面八方看见自己。', quiet:false },
-        { text: '如今镜片仍在，但映出的已是另一个国家。', quiet:false },
+        { text: '卡扎尔王朝用十万面镜片铺满这座厅堂。', quiet:false },
+        { text: '光从穹顶落下，被切成千万道，', quiet:false },
+        { text: '让每一位来客都能从四面八方，看见自己。', quiet:false },
+        { text: '两百年来，这里一直叫做——镜厅。', quiet:false },
+      ]
+    },
+    // 灼烧阶段的文案：突出战争带来的、不可修复的遗憾
+    collapseStory: {
+      coord: 'TEHRAN · 35.68°N / 51.42°E',
+      day: 'day 1',
+      lines: [
         { text: '2026 年 3 月 20 日，诺鲁孜节。', quiet:true },
-        { text: '他们说：镜子碎了可以重拼，节日过了可以再来。', quiet:true },
-        { text: '但这一年的春天，没有如期而至。', quiet:true },
+        { text: '一枚导弹穿过穹顶。', quiet:false },
+        { text: '十万面镜片，一面接一面，碎在地上。', quiet:false },
+        { text: '他们说，镜子碎了可以重拼。', quiet:true },
+        { text: '但有些光，碎了就再也照不回来了。', quiet:false },
       ]
     }
   },
   {
-    id: 'tehran', name: 'TEHRAN', zh:'德黑兰',
-    lon: 51.40, lat: 35.70, day: 23,
-    modelId: 'tehran',
-    panoUrl: './bg01.png',
-    subtitle: 'WORKSHOP NO.07',
-    subtitleRight: 'SETAR',
-    subtitleRight2: 'سه‌تار',
+    id: 'tabriz', name: 'TABRIZ', zh:'大不里士 · 巴扎作坊',
+    lon: 46.30, lat: 38.08, day: 23,
+    modelId: 'tabriz',
+    panoUrl: null,  // 关闭天空盒：纪录片定镜，靠暗角+暖光晕营造氛围
+    subtitle: 'BAZAAR WORKSHOP',
+    subtitleRight: 'PERSIAN CARPET',
+    subtitleRight2: 'فرش ایرانی',
     sceneReady: true,
     story: {
-      coord: 'TEHRAN · 35.70°N / 51.40°E',
+      coord: 'TABRIZ · 38.08°N / 46.30°E',
       day: 'day 23',
       lines: [
-        { text: '德黑兰城南一间不到十平米的作坊里，', quiet:false },
-        { text: '有一把塞塔尔琴，制作到第 80%。', quiet:false },
-        { text: '匠人做了三十年这件事，他的父亲也是。', quiet:false },
-        { text: '第 23 天，屋顶塌了。琴颈还在木架上。', quiet:true },
-        { text: '四根弦，从细到粗，依次崩断。', quiet:true },
+        { text: '一块大不里士地毯，350 个结每平方英寸。', quiet:false },
+        { text: '一个织工每天只能织一排，', quiet:false },
+        { text: '一块 3 × 5 米的毯子，要织整整两年。', quiet:false },
+        { text: '这一块，已经织了一年零四个月。', quiet:false },
+      ]
+    },
+    collapseStory: {
+      coord: 'TABRIZ · 38.08°N / 46.30°E',
+      day: 'day 23',
+      lines: [
+        { text: '2026 年 4 月 12 日。', quiet:true },
+        { text: '导弹擦过 Tabriz 巴扎的屋顶。', quiet:false },
+        { text: '一根丝线、一根丝线，倒着退了回去。', quiet:false },
+        { text: '他们说，毯子烧了可以再织一块。', quiet:true },
+        { text: '但织进去的一年零四个月，回不来了。', quiet:false },
       ]
     }
   },
@@ -1469,15 +1719,44 @@ function loadShardModel(){
       scene: gltf.scene,
       animations: gltf.animations, // AnimationClip 数组
     };
-    // 隐藏地面
-    gltf.scene.traverse(o => {
-      if(!o.isMesh) return;
+    // 隐藏地面 / 超大平板 mesh
+    // 思路：先按名字过滤；再按"扁平 + 超大面积"过滤（地面通常是大而扁的 Plane）
+    gltf.scene.updateMatrixWorld(true);
+    const meshList = [];
+    gltf.scene.traverse(o => { if(o.isMesh) meshList.push(o); });
+    // 计算每个 mesh 的世界空间 bbox
+    const meshInfo = meshList.map(o => {
+      const b = new THREE.Box3().setFromObject(o);
+      const s = new THREE.Vector3(); b.getSize(s);
+      // 用横向面积（x*z 平面投影）+ 厚度比来判断是否地面
+      const horizArea = s.x * s.z;
+      const thinAxis = Math.min(s.x, s.y, s.z);
+      const longAxis = Math.max(s.x, s.y, s.z);
+      const flatness = longAxis / Math.max(thinAxis, 0.0001);
+      return { o, horizArea, flatness, size: s, vCount: o.geometry?.getAttribute('position')?.count || 0 };
+    });
+    // 按 horizArea 排序，看最大的一个是不是异常大
+    meshInfo.sort((a,b) => b.horizArea - a.horizArea);
+    const avgArea = meshInfo.slice(1).reduce((s,m) => s + m.horizArea, 0) / Math.max(meshInfo.length - 1, 1);
+    meshList.forEach(o => {
       const nm = (o.name || '').toLowerCase();
       if(nm.includes('plane') || nm.includes('ground') || nm.includes('floor')){
         o.visible = false;
+        o._isShardGround = true;
+        return;
+      }
+      const info = meshInfo.find(m => m.o === o);
+      // 启发式：横向面积 > 平均面积 * 8，且扁平度 > 8（很大很扁）→ 地面
+      if(info && info.horizArea > avgArea * 8 && info.flatness > 8){
+        o.visible = false;
+        o._isShardGround = true;
+        console.log('[shard] 识别为地面/平板并隐藏:', o.name, '面积:', info.horizArea.toFixed(1), '扁平度:', info.flatness.toFixed(1));
       }
       const vCount = o.geometry?.getAttribute('position')?.count || 0;
-      if(vCount < 10) o.visible = false;
+      if(vCount < 10){
+        o.visible = false;
+        o._isShardGround = true;
+      }
     });
     // 算包围盒
     gltf.scene.updateMatrixWorld(true);
@@ -1731,6 +2010,13 @@ function triggerChandelierCollapse(){
   const mdlG = MODELS.golestan;
   if(mdlG.collapseState !== 'idle') return;
   if(!shardModelMeshes || !shardModelMeshes.scene){ console.warn('[shard] 碎片模型未加载'); return; }
+  // 崩塌起爆时重新启用自动旋转：用户操作过的 yaw 累积值清零，旋转从当前视角"接续"开始
+  // —— 让画面在碎片飞散时再次缓慢转起来，呼应进场时的"空间感"
+  // 启动加速过冲：1.2s 内从 PEAK(0.6) 缓动到 SETTLE(0.18)，呼应爆炸冲击波
+  autoRotateActive = true;
+  autoRotateYaw = 0;
+  autoRotateSpeed = AUTO_ROTATE_BOOST_PEAK;
+  _autoRotateBoostStart = performance.now();
   mdlG.collapseState = 'collapsing';
   crystalCollapseActive = true;
 
@@ -1738,11 +2024,11 @@ function triggerChandelierCollapse(){
   if(!container) return;
   shardObjects = []; shardInstMeshes = [];
 
-  // CSS 闪光 + 光柱
-  const flashEl = document.getElementById('shatterFlash');
-  if(flashEl){ flashEl.classList.remove('active'); void flashEl.offsetWidth; flashEl.classList.add('active'); }
-  const beamEl = document.getElementById('shatterBeam');
-  if(beamEl){ setTimeout(()=>{ beamEl.classList.remove('active'); void beamEl.offsetWidth; beamEl.classList.add('active'); }, 300); }
+  // CSS 闪光 + 光柱（已禁用：白雾覆盖太抢戏）
+  // const flashEl = document.getElementById('shatterFlash');
+  // if(flashEl){ flashEl.classList.remove('active'); void flashEl.offsetWidth; flashEl.classList.add('active'); }
+  // const beamEl = document.getElementById('shatterBeam');
+  // if(beamEl){ setTimeout(()=>{ beamEl.classList.remove('active'); void beamEl.offsetWidth; beamEl.classList.add('active'); }, 300); }
   // 不暗化背景（去掉蒙灰蒙版）
 
   // 吊灯世界空间——排除 Plane417（宫殿场景面板，不属于吊灯本体）
@@ -1787,6 +2073,10 @@ function triggerChandelierCollapse(){
   shardScene.position.set(-shardCenter.x, -shardCenter.y, -shardCenter.z);
   shardGroup.scale.setScalar(shardScale);
   shardGroup.position.set(0, mdlG.yOffset || 0, 0); // 同步吊灯高度
+  // 关键：让碎片在烧灼层之上渲染（panoBurnSphere.renderOrder = -9）
+  // —— 烧灼是给全景背景做的"焦化"效果，碎片是前景实体，不应被覆盖成黑色
+  // 给碎片 group 设大的 renderOrder，所有子 mesh 在 traverse 替换材质时也跟随设置
+  shardGroup.renderOrder = 10;
   console.log('[shard] shardCenter:', shardCenter.x.toFixed(1), shardCenter.y.toFixed(1), shardCenter.z.toFixed(1), 'shardScale:', shardScale.toFixed(3));
   scene.add(shardGroup);
 
@@ -1811,13 +2101,28 @@ function triggerChandelierCollapse(){
       crystalMat.envMapIntensity = 1.5;
     }
     crystalMat.side = THREE.DoubleSide;
+    crystalMat.transparent = true;
+    crystalMat.opacity = 0; // 初始全透明，由 update 淡入
+    crystalMat._origOpacityTarget = 1.0; // 目标值
+    // 关键：开启 depthWrite，让碎片在 transparent 队列里写深度，
+    //       烧灼层 panoBurnSphere（renderOrder=-9）先画 → 碎片后画 → 完全覆盖烧灼色
+    crystalMat.depthWrite = true;
     crystalMat.needsUpdate = true;
     shardScene.traverse(o => {
-      if(o.isMesh) o.material = crystalMat;
+      if(!o.isMesh) return;
+      // 双保险：识别为地面的 mesh 一定保持隐藏，不参与材质替换
+      if(o._isShardGround){
+        o.visible = false;
+        return;
+      }
+      o.material = crystalMat;
+      o.visible = true;
+      // 每个子 mesh 显式置高 renderOrder，确保排在 panoBurnSphere(-9) 之后
+      o.renderOrder = 10;
     });
   }
 
-  // 播放原始碎裂动画！
+  // 播放原始碎裂动画（延后 0.18s 起播，让前期保持原形 → 营造"吊灯分裂"的连续感）
   shardMixer = new THREE.AnimationMixer(shardScene);
   if(shardModelMeshes.animations && shardModelMeshes.animations.length > 0){
     const clip = shardModelMeshes.animations[0];
@@ -1825,7 +2130,9 @@ function triggerChandelierCollapse(){
     action.setLoop(THREE.LoopOnce);
     action.clampWhenFinished = true;
     action.play();
-    console.log('[shard] 播放原始动画，时长:', clip.duration.toFixed(2), 's');
+    // 先 update(0) 一次，让骨架/位置应用到动画第 0 帧（碎片处于聚拢形态）
+    shardMixer.update(0);
+    console.log('[shard] 动画准备就绪，时长:', clip.duration.toFixed(2), 's（延迟 0.34s 起爆）');
   }
 
   shardInstMeshes.push({inst: shardGroup, mat: null});
@@ -1833,7 +2140,7 @@ function triggerChandelierCollapse(){
   mdlG._shardDirLight2 = shardDirLight2;
   mdlG._shardAmbLight = shardAmbLight;
 
-  // 微尘
+  // 微尘粒子（碎裂时的闪烁微粒）
   const dustSamples = [{pos: cCenter.clone()}];
   for(let i = 0; i < 20; i++){
     dustSamples.push({pos: new THREE.Vector3(
@@ -1844,11 +2151,33 @@ function triggerChandelierCollapse(){
   }
   createDustSystemWorld(dustSamples, cSize, cCenter);
 
+
+
   collapseStartTime = performance.now();
 
-  // 隐藏原吊灯
-  mdlG.gltfScene.visible = false;
-  mdlG.gltfScene.traverse(o => { if(o.isMesh) o.visible = false; });
+  // 不再瞬间隐藏原吊灯！改为：吊灯所有材质快速淡出（让碎片"分裂"出来）
+  // 收集所有原吊灯材质，记录原 opacity，并把 transparent 打开
+  mdlG._fadeOutMats = [];
+  const seenMats = new Set();
+  mdlG.gltfScene.traverse(o => {
+    if(!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(m => {
+      if(!m || seenMats.has(m)) return;
+      seenMats.add(m);
+      // 保险：保存原 opacity / transparent / depthWrite
+      m._collapseOrigOpacity = (m.opacity !== undefined) ? m.opacity : 1.0;
+      m._collapseOrigTransparent = m.transparent;
+      m._collapseOrigDepthWrite = m.depthWrite;
+      m.transparent = true;
+      // 半透明阶段关闭 depthWrite，避免穿模闪烁
+      m.depthWrite = false;
+      mdlG._fadeOutMats.push(m);
+    });
+  });
+  console.log('[shard] 进入淡出，材质数:', mdlG._fadeOutMats.length);
+
+  // 隐藏地图粒子
   points.visible = false;
 
   const blastLight = new THREE.PointLight(0xaaddff, 10, maxDim*3);
@@ -1856,6 +2185,30 @@ function triggerChandelierCollapse(){
   mdlG._blastLight = blastLight;
 
   if(COORDINATES[currentSceneIdx]?.sceneReady) storyEl.classList.add('show');
+
+  // —— 启动全景烧灼层（7s 缓慢焦化，最终全黑） ——
+  panoBurnSphere.visible = true;
+  panoBurnSphere.material.uniforms.uProgress.value = 0.05;  // 起点抬高，让一开始就有零星焦斑
+  mdlG._burnStartTime = performance.now();
+  mdlG._burnTotal = 7.0;            // 总时长 7s
+  mdlG._collapseLinesShown = 0;     // 已展示的崩坏文案行数
+  mdlG._collapseStoryActive = false;
+
+  // 在烧灼开始约 0.4s 后，把 story 卡切换为崩坏版（直接替换内容，容器保持可见）
+  const collapseStoryData = COORDINATES[currentSceneIdx]?.collapseStory;
+  if(collapseStoryData && storyEl){
+    setTimeout(()=>{
+      if(mdlG.collapseState !== 'collapsing') return;
+      // 直接替换内部 HTML（容器 .show 保留），然后切到崩坏样式
+      storyEl.querySelector('.story-card-inner').innerHTML =
+        buildStoryHTML(collapseStoryData, COORDINATES[currentSceneIdx]);
+      storyEl.classList.add('collapse-story');
+      // 确保容器仍可见（从浏览器视角"内容刷新"，淡入靠 p 自己的 .show 触发）
+      if(!storyEl.classList.contains('show')) storyEl.classList.add('show');
+      mdlG._collapseStoryActive = true;
+      mdlG._collapseStorySwitchTime = performance.now();  // story 切换的时刻，用作文案节拍基准
+    }, 400);
+  }
 
   // 动画播完后清理（给足时间）
   const clipDuration = shardModelMeshes.animations[0]?.duration || 5;
@@ -1872,10 +2225,17 @@ function triggerChandelierCollapse(){
       if(mdlG._shardDirLight&&mdlG._shardDirLight.parent) mdlG._shardDirLight.parent.remove(mdlG._shardDirLight);
       if(mdlG._shardDirLight2&&mdlG._shardDirLight2.parent) mdlG._shardDirLight2.parent.remove(mdlG._shardDirLight2);
       if(mdlG._shardAmbLight&&mdlG._shardAmbLight.parent) mdlG._shardAmbLight.parent.remove(mdlG._shardAmbLight);
-      panoDimSphere.material.opacity=0.15;
-      nextHint.classList.add('show');
+      // 注意：碎片清理后 panoDimSphere 不再回弹（烧灼接管暗化），保留 0
+      // nextHint 不在这里 add('show')，等烧灼结束（~7.5s）再显示
     }
   }, (clipDuration + 2) * 1000);
+
+  // 烧灼结束后（总时长 + 0.5s 缓冲）显示 nextHint，等待用户点击进下一场景
+  mdlG._nextHintTimeout = setTimeout(()=>{
+    if(mdlG.collapseState === 'collapsing' || mdlG.collapseState === 'done'){
+      nextHint.classList.add('show');
+    }
+  }, (mdlG._burnTotal + 0.5) * 1000);
 
   console.log('[golestan] 碎裂！播放原始动画 shardScale:', shardScale.toFixed(3), 'maxDim:', maxDim.toFixed(1));
 }
@@ -1889,9 +2249,58 @@ function updateChandelierCollapse(dt, time){
   const dtSec = dt / 60;
   const elapsed = (performance.now() - collapseStartTime) / 1000;
 
-  // 驱动碎片动画
-  if(shardMixer){
+  // ========== 衔接过渡：吊灯淡出 + 碎片淡入 ==========
+  // 0 ~ 0.22s：吊灯保持完整（被点中的"停顿"，留更多实体停留时间）
+  // 0.22 ~ 0.52s：吊灯 1→0，碎片 0→1（交叉淡入淡出）
+  // 0.52s 后：吊灯彻底隐藏，碎片完全显形
+  if(!mdlG._gltfHiddenAfterFade){
+    const fadeDelay = 0.22;
+    const fadeDuration = 0.30;
+    const localT = Math.max(0, elapsed - fadeDelay);
+    const t = Math.min(1, localT / fadeDuration);
+    const tSmooth = t * t * (3 - 2 * t); // smoothstep
+    const fadeOut = 1 - tSmooth;
+    // 吊灯淡出
+    if(mdlG._fadeOutMats){
+      for(let i = 0; i < mdlG._fadeOutMats.length; i++){
+        const m = mdlG._fadeOutMats[i];
+        const base = (m._collapseOrigOpacity !== undefined) ? m._collapseOrigOpacity : 1.0;
+        m.opacity = base * fadeOut;
+      }
+    }
+    // 碎片淡入
+    const group = shardInstMeshes[0]?.inst;
+    if(group){
+      group.traverse(o => {
+        if(!o.isMesh || !o.material) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(m => {
+          if(m._origOpacityTarget !== undefined){
+            m.opacity = m._origOpacityTarget * tSmooth;
+          }
+        });
+      });
+    }
+    // 过渡完成：把吊灯彻底隐藏（一次性）
+    if(elapsed >= fadeDelay + fadeDuration){
+      mdlG.gltfScene.visible = false;
+      mdlG._gltfHiddenAfterFade = true;
+      console.log('[shard] 淡出完成，吊灯已隐藏');
+    }
+  }
+  // ==================================================
+
+  // 驱动碎片动画（在淡出中段附近起播，碎片有"先粘在原位再爆开"的感觉）
+  if(shardMixer && elapsed >= 0.34){
     shardMixer.update(dtSec);
+  }
+
+  // 每帧确保地面 mesh 始终隐藏（防止动画轨道把 visibility 改回 true）
+  const groupRoot = shardInstMeshes[0]?.inst;
+  if(groupRoot){
+    groupRoot.traverse(o => {
+      if(o.isMesh && o._isShardGround) o.visible = false;
+    });
   }
 
   // 与动画同步：检测停在"地面"附近的碎片，给它们加额外重力
@@ -1959,6 +2368,47 @@ function updateChandelierCollapse(dt, time){
     }
     dPos.needsUpdate = true;
   }
+
+  // ========== 全景烧灼层推进 + sparkle 淡出 + 崩坏文案逐行展示 ==========
+  if(panoBurnSphere.visible && mdlG._burnStartTime){
+    const T = mdlG._burnTotal || 7.0;
+    const burnElapsed = (performance.now() - mdlG._burnStartTime) / 1000;
+    const raw = Math.min(1, burnElapsed / T);
+    // 进度曲线：前 2/3 缓慢（看清焦化过程），后 1/3 加速吞没
+    const eased = raw < 0.66
+      ? raw * (0.56 / 0.66)
+      : 0.56 + (raw - 0.66) * (1.0 - 0.56) / 0.34;
+    // 映射到 shader 的 0.05 → 1.10（起点已有少量焦斑，终点完全焦黑）
+    panoBurnSphere.material.uniforms.uProgress.value = 0.05 + eased * 1.05;
+    panoBurnSphere.material.uniforms.uTime.value = time * 0.001;
+
+    // dimSphere 在后半段让位（避免两层透明叠加产生灰雾）
+    if(eased > 0.5){
+      const t2 = Math.min(1, (eased - 0.5) / 0.5);
+      panoDimSphere.material.opacity = 0.15 * (1 - t2);
+    }
+
+    // sparkle 在烧灼早期（eased 0.15~0.40）同步淡出（水晶都碎了，反光自然消失）
+    if(eased > 0.15 && sparkleGroup.visible){
+      const sparkleFade = Math.max(0, 1 - (eased - 0.15) / 0.25);
+      // 此处直接覆写 uOpacity；主循环里的平滑 lerp 也会朝 0 收敛，互不冲突
+      sparkleMat.uniforms.uOpacity.value = Math.min(sparkleMat.uniforms.uOpacity.value, sparkleFade);
+    }
+
+    // 崩坏文案逐行展示：从 story 切换那一刻起，每 1.2s 出现一行（5 行约 6s 内全显）
+    if(mdlG._collapseStoryActive && mdlG._collapseStorySwitchTime){
+      const storyElapsed = (performance.now() - mdlG._collapseStorySwitchTime) / 1000;
+      // 第 i 行（i=0..4）在 storyElapsed = 0.2 + i * 1.2s 时出现
+      const targetShown = Math.min(5, Math.max(0, Math.floor((storyElapsed - 0.2) / 1.2) + 1));
+      if(targetShown > (mdlG._collapseLinesShown || 0)){
+        const ps = storyEl.querySelectorAll('.story-card-inner p');
+        for(let i = mdlG._collapseLinesShown; i < targetShown && i < ps.length; i++){
+          ps[i].classList.add('show');
+        }
+        mdlG._collapseLinesShown = targetShown;
+      }
+    }
+  }
 }
 
 /* 退出场景 1：清理实体模型 */
@@ -1996,29 +2446,66 @@ function cleanupChandelierScene(){
     mdlG.gltfScene.traverse(o => {
       if(!o.isMesh) return;
       o.visible = true;
-      if(o.material){
-        const mats = Array.isArray(o.material) ? o.material : [o.material];
-        mats.forEach(mat => {
-          if(mat._origOpacity !== undefined) mat.opacity = mat._origOpacity;
-          mat.needsUpdate = true;
-        });
-      }
       o.scale.set(1,1,1);
       o.rotation.set(0,0,0);
     });
   }
+  // 恢复淡出阶段记录的材质 opacity/transparent/depthWrite
+  if(mdlG._fadeOutMats){
+    mdlG._fadeOutMats.forEach(m => {
+      if(m._collapseOrigOpacity !== undefined){
+        m.opacity = m._collapseOrigOpacity;
+        delete m._collapseOrigOpacity;
+      }
+      if(m._collapseOrigTransparent !== undefined){
+        m.transparent = m._collapseOrigTransparent;
+        delete m._collapseOrigTransparent;
+      }
+      if(m._collapseOrigDepthWrite !== undefined){
+        m.depthWrite = m._collapseOrigDepthWrite;
+        delete m._collapseOrigDepthWrite;
+      }
+      m.needsUpdate = true;
+    });
+    mdlG._fadeOutMats = null;
+  }
+  mdlG._gltfHiddenAfterFade = false;
 
   if(mdlG.shardMesh) mdlG.shardMesh.visible = false;
   mdlG.collapseState = 'idle';
   if(mdlG.shardData) mdlG.shardData.active = false;
   crystalCollapseActive = false;
   if(mdlG._collapseTimeout) clearTimeout(mdlG._collapseTimeout);
+  if(mdlG._nextHintTimeout) clearTimeout(mdlG._nextHintTimeout);
+  mdlG._collapseTimeout = null;
+  mdlG._nextHintTimeout = null;
   if(mdlG._blastLight && mdlG._blastLight.parent) mdlG._blastLight.parent.remove(mdlG._blastLight);
   if(mdlG._shardDirLight && mdlG._shardDirLight.parent) mdlG._shardDirLight.parent.remove(mdlG._shardDirLight);
   if(mdlG._shardDirLight2 && mdlG._shardDirLight2.parent) mdlG._shardDirLight2.parent.remove(mdlG._shardDirLight2);
   if(mdlG._shardAmbLight && mdlG._shardAmbLight.parent) mdlG._shardAmbLight.parent.remove(mdlG._shardAmbLight);
   shardMixer = null;
   shardExtraFall = {};
+
+  // 全景烧灼层重置
+  if(panoBurnSphere){
+    panoBurnSphere.visible = false;
+    panoBurnSphere.material.uniforms.uProgress.value = -0.2;
+    panoBurnSphere.material.uniforms.uTime.value = 0;
+  }
+  mdlG._burnStartTime = null;
+  mdlG._collapseStoryActive = false;
+  mdlG._collapseLinesShown = 0;
+  mdlG._collapseStorySwitchTime = null;
+  // 关闭自动旋转（防御：返回地图后下次再进 golestan 会在 enterScene 重新启用）
+  autoRotateActive = false;
+  autoRotateYaw = 0;
+  autoRotateSpeed = AUTO_ROTATE_SPEED_BASE;
+  _autoRotateBoostStart = 0;
+
+  // 还原 story-card 状态（去掉崩坏 modifier，避免污染下次进场）
+  if(storyEl){
+    storyEl.classList.remove('collapse-story');
+  }
 
   // 恢复粒子系统
   points.visible = true;
@@ -2027,6 +2514,478 @@ function cleanupChandelierScene(){
   scene.fog = new THREE.FogExp2(0x05070d, 0.0035);
   console.log('[golestan] 场景清理完成');
 }
+
+
+/* ================================================================
+ *  场景 2 · 大不里士地毯作坊（4 段视频驱动 · 猫拆地毯）
+ *  叙事：用户进入大不里士巴扎织毯作坊，看到一只白色波斯猫
+ *       盯着地上的红色毛线球。点击猫爪，猫一脚踢飞毛线球，
+ *       毛线被扯出织机，整张地毯散开消失，画面渐黑。
+ *  技术：零 3D——4 段竖屏 9:16 视频组成完整剧情：
+ *       V1 推进：特写梭子织地毯 → 拉远到全景（一次性 ~6s）
+ *       V2 待机：猫爪对毛线球跃跃欲试（loop，首尾帧一致）
+ *       V3 触发：猫踢飞毛线球，毛线被拉扯（一次性 ~5s）
+ *       V4 崩坏：地毯散开 → 织机倾倒 → 渐黑（一次性 ~7s）
+ *  交互：V2 期间右下角猫爪热区可点击；30 秒无操作自动触发 V3。
+ * ================================================================ */
+
+// 视频资源 URL：5 段独立 video 模式
+// 每段一个 mp4，单独编码（720×1280, h264, 24fps），头尾各砍 0.1s 去除 AI 生成的静帧+假推镜
+// V3 用 video.loop=true 循环（猫看毛线球），等用户点击猫爪或超时进 V4
+// 部署时 mp4 不打包入 H5，必须走 CDN
+// 视频版本号：内容更新时递增，强制浏览器/CDN 重新请求
+const _TABRIZ_V = '?v=10';
+const TABRIZ_VIDEO_URLS = {
+  v1: (_isLocal ? './videos/tabrizV1_seg.mp4' : _CDN + 'videos/tabrizV1_seg.mp4') + _TABRIZ_V,
+  v2: (_isLocal ? './videos/tabrizV2_seg.mp4' : _CDN + 'videos/tabrizV2_seg.mp4') + _TABRIZ_V,
+  // V3 单独换文件名是为了绕过 mat1.gtimg.com 的 CDN 边缘缓存
+  // —— 之前 1.5×/2×/3× 三次源站上传都被 CDN Cache Hit 拦截，URL 不变就不重新拉源
+  v3: (_isLocal ? './videos/tabrizV3_seg_3x.mp4' : _CDN + 'videos/tabrizV3_seg_3x.mp4') + _TABRIZ_V,
+  v4: (_isLocal ? './videos/tabrizV4_seg.mp4' : _CDN + 'videos/tabrizV4_seg.mp4') + _TABRIZ_V,
+  v5: (_isLocal ? './videos/tabrizV5_seg.mp4' : _CDN + 'videos/tabrizV5_seg.mp4') + _TABRIZ_V,
+};
+// V3 无操作多久自动触发 V4（毫秒）
+const TABRIZ_V3_AUTO_TIMEOUT = 30000;
+// 视频段状态枚举
+const TABRIZ_VIDEO_STATE = {
+  IDLE: 'idle',
+  V1: 'v1',
+  V2: 'v2',
+  V3: 'v3',
+  V4: 'v4',
+  V5: 'v5',
+  DONE: 'done',
+};
+
+// DOM 引用
+let _tabrizRoot = null;
+let _tabrizV1 = null, _tabrizV2 = null, _tabrizV3 = null, _tabrizV4 = null, _tabrizV5 = null;
+let _tabrizCap1 = null, _tabrizCap2 = null;
+let _tabrizSubtitle = null;             // 字幕容器
+let _tabrizSubLines = {};               // { key: <span> }
+let _tabrizPawHint = null;
+let _tabrizFadeout = null;
+let _tabrizFadein = null;        // 入场黑场遮罩（V1 在它后面已经开始播）
+let _tabrizFadeinStarted = false; // 是否已开始 fade-out（避免 playing 重复触发）
+
+// 状态
+let _tabrizCurState = TABRIZ_VIDEO_STATE.IDLE;
+let _tabrizV3Timer = null;
+let _tabrizCaptionTimers = [];
+let _tabrizActiveVideo = null;  // 当前正在播放的 video 元素引用
+
+/* 入口：进入 Tabriz 场景。函数名保留以兼容外部调用 */
+function enterCarpetScene(){
+  const mdlT = MODELS.tabriz;
+  _initTabrizVideoDom();
+  if(!_tabrizRoot){
+    console.warn('[tabriz] DOM 初始化失败');
+    return false;
+  }
+  // 隐藏 3D 粒子系统（Tabriz 期间用纯 DOM 视频）
+  scene.fog = null;
+  points.visible = false;
+  ambient.visible = false;
+  for(let i = 0; i < COUNT; i++){
+    positions[i*3] = 0; positions[i*3+1] = -9999; positions[i*3+2] = 0;
+  }
+  posAttr.needsUpdate = true;
+
+  mdlT.active = true;
+  // 进入根容器
+  _tabrizRoot.classList.remove('fade-out');
+  _tabrizRoot.classList.add('show');
+  _tabrizFadeout.classList.remove('show');
+  // Tabriz 不使用全局 story-card（改用专用底部字幕条）：主动隐藏 storyEl
+  if(typeof storyEl !== 'undefined' && storyEl){
+    storyEl.classList.remove('show');
+    storyEl.classList.remove('collapse-story');
+  }
+  // 入场黑场：确保黑屏遮罩处于 show 状态，V1 在它后面开始播
+  _tabrizFadeinStarted = false;
+  if(_tabrizFadein) _tabrizFadein.classList.add('show');
+
+  // 启动 V1 段
+  _tabrizPlayV1();
+  console.log('[tabriz] 视频场景启动');
+  return true;
+}
+
+/* 退出：清理 DOM + 视频，函数名保留以兼容外部调用 */
+function cleanupCarpetScene(){
+  const mdlT = MODELS.tabriz;
+  if(!mdlT.active) return;
+  mdlT.active = false;
+  _tabrizClearTimers();
+  _tabrizClearCaptionTimers();
+  // 暂停所有 video
+  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
+    if(!v) return;
+    try { v.pause(); v.loop = false; } catch(_e){}
+  });
+  _tabrizActiveVideo = null;
+  // 隐藏 UI
+  if(_tabrizPawHint) _tabrizPawHint.classList.remove('show');
+  if(_tabrizCap1) _tabrizCap1.classList.remove('show');
+  if(_tabrizCap2) _tabrizCap2.classList.remove('show');
+  // 清掉所有字幕行的 .show
+  if(_tabrizSubLines){
+    Object.values(_tabrizSubLines).forEach(el => el && el.classList.remove('show'));
+  }
+  if(_tabrizFadeout) _tabrizFadeout.classList.remove('show');
+  if(_tabrizFadein) _tabrizFadein.classList.remove('show');
+  _tabrizFadeinStarted = false;
+  // 清掉 V5 模糊（防止下次进场残留）
+  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
+    if(v) v.classList.remove('v5-blur');
+  });
+  // 隐藏根容器
+  if(_tabrizRoot){
+    _tabrizRoot.classList.remove('show', 'fade-out');
+  }
+  _tabrizCurState = TABRIZ_VIDEO_STATE.IDLE;
+  // 恢复粒子系统
+  points.visible = true;
+  ambient.visible = true;
+  scene.fog = new THREE.FogExp2(0x05070d, 0.0035);
+  console.log('[tabriz] 视频场景清理完成');
+}
+
+/* DOM 初始化（仅一次）
+ * 【5 段独立 video 模式】每段视频一个 <video> 元素，分别加载各自的 src：
+ *   - V1: tabrizV1_seg.mp4（intro 工艺特写→拉远）
+ *   - V2: tabrizV2_seg.mp4（push-in 推近到猫）
+ *   - V3: tabrizV3_seg.mp4（paw 猫看毛线球，loop=true 循环）
+ *   - V4: tabrizV4_seg.mp4（chase 猫追线 + 织机被扯）
+ *   - V5: tabrizV5_seg.mp4（unravel 地毯解构收尾）
+ *   段切换时：暂停旧 video + display:none，新 video display:'' + play()
+ *   头尾各砍 0.1s 已在素材层面处理（_hc_*.mp4），消除 AI 生成的静帧+假推镜 */
+function _initTabrizVideoDom(){
+  if(_tabrizRoot) return;
+  _tabrizRoot     = document.getElementById('tabrizSceneRoot');
+  _tabrizV1       = document.getElementById('tabrizV1');
+  _tabrizV2       = document.getElementById('tabrizV2');
+  _tabrizV3       = document.getElementById('tabrizV3');
+  _tabrizV4       = document.getElementById('tabrizV4');
+  _tabrizV5       = document.getElementById('tabrizV5');
+  _tabrizCap1     = document.getElementById('tabrizCap1');
+  _tabrizCap2     = document.getElementById('tabrizCap2');
+  _tabrizSubtitle = document.getElementById('tabrizSubtitle');
+  if(_tabrizSubtitle){
+    _tabrizSubLines = {};
+    _tabrizSubtitle.querySelectorAll('.tabriz-subtitle-line').forEach(el => {
+      const k = el.getAttribute('data-key');
+      if(k) _tabrizSubLines[k] = el;
+    });
+  }
+  _tabrizPawHint  = document.getElementById('tabrizPawHint');
+  _tabrizFadeout  = document.getElementById('tabrizFadeout');
+  _tabrizFadein   = document.getElementById('tabrizFadein');
+  if(!_tabrizRoot || !_tabrizV1) return;
+
+  // 给每段 video 设 src + preload，全部先隐藏
+  const segs = [
+    [_tabrizV1, TABRIZ_VIDEO_URLS.v1],
+    [_tabrizV2, TABRIZ_VIDEO_URLS.v2],
+    [_tabrizV3, TABRIZ_VIDEO_URLS.v3],
+    [_tabrizV4, TABRIZ_VIDEO_URLS.v4],
+    [_tabrizV5, TABRIZ_VIDEO_URLS.v5],
+  ];
+  segs.forEach(([v, url]) => {
+    if(!v) return;
+    v.muted = true;
+    v.loop = false;
+    v.style.display = 'none';
+    v.classList.remove('active');
+    if(v.src !== url && v.currentSrc !== url){
+      v.src = url;
+      try { v.load(); } catch(_){}
+    }
+  });
+
+  // 每个 video 都绑 ended 事件：自动切到下一段
+  if(_tabrizV1) _tabrizV1.addEventListener('ended', _tabrizOnV1Ended);
+  if(_tabrizV2) _tabrizV2.addEventListener('ended', _tabrizOnV2Ended);
+  // V3 是 loop=true，不会触发 ended（由猫爪点击或超时切到 V4）
+  if(_tabrizV4) _tabrizV4.addEventListener('ended', _tabrizOnV4Ended);
+  if(_tabrizV5) _tabrizV5.addEventListener('ended', _tabrizOnV5Ended);
+  // V1 首次开播 → 触发入场黑场 fade-out（视频已经在动了再显示）
+  if(_tabrizV1) _tabrizV1.addEventListener('playing', _tabrizOnV1Playing);
+  // error 兜底
+  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
+    if(v) v.addEventListener('error', _tabrizOnVideoError);
+  });
+
+  // 猫爪热区点击 → 触发 V4（V3 期间）
+  if(_tabrizPawHint){
+    _tabrizPawHint.addEventListener('click', _tabrizOnPawClick);
+    _tabrizPawHint.addEventListener('touchend', _tabrizOnPawClick);
+  }
+}
+
+/* 切换显示的 video：旧的暂停隐藏，新的显示并播放 */
+function _tabrizSwitchToVideo(newVideo){
+  if(!newVideo) return;
+  // 暂停并隐藏其他段
+  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
+    if(!v || v === newVideo) return;
+    try { v.pause(); } catch(_){}
+    v.classList.remove('active');
+    v.style.display = 'none';
+  });
+  // 显示并播放新段
+  newVideo.style.display = '';
+  newVideo.classList.add('active');
+  try { newVideo.currentTime = 0; } catch(_){}
+  _tabrizActiveVideo = newVideo;
+  _tabrizSafePlay(newVideo, _tabrizFinishScene);
+}
+
+function _tabrizOnVideoError(e){
+  console.warn('[tabriz] 视频错误', e && e.target && e.target.error);
+  _tabrizFinishScene();
+}
+
+/* V1 首次 playing 事件 → 启动入场黑场 fade-out。
+   关键：playing 事件在视频真正开始解码并产生新帧时才触发，此时移除遮罩
+   能保证用户看到的"渐显"内容是已经在动的画面，而不是冻结的首帧。
+   只触发一次（_tabrizFadeinStarted 标记），后续 V1 重播不再淡入。 */
+function _tabrizOnV1Playing(){
+  if(_tabrizFadeinStarted) return;
+  _tabrizFadeinStarted = true;
+  // 延 80ms 再淡出：给视频几帧的缓冲，避免有些设备 playing 事件早于真正出帧
+  setTimeout(()=>{
+    if(_tabrizFadein) _tabrizFadein.classList.remove('show');
+  }, 80);
+}
+
+/* 工具：尝试播放视频，失败兜底 */
+function _tabrizSafePlay(video, onFail){
+  if(!video) { if(onFail) onFail(); return; }
+  try {
+    const p = video.play();
+    if(p && typeof p.catch === 'function'){
+      p.catch(err => {
+        console.warn('[tabriz] 视频播放失败:', err && err.message);
+        if(onFail) onFail();
+      });
+    }
+  } catch(e){
+    console.warn('[tabriz] play 异常:', e);
+    if(onFail) onFail();
+  }
+}
+
+/* === V1：intro（工艺特写→拉远全景，约 7.7s） ===
+   V1 期间字幕：1.0s 起出第 1 句"350 个结"，停 4.5s 淡出。
+   后续 s2/s3 在 V2 进入时再排（V1 ended 触发 V2）。 */
+function _tabrizPlayV1(){
+  _tabrizCurState = TABRIZ_VIDEO_STATE.V1;
+  _tabrizSwitchToVideo(_tabrizV1);
+  _tabrizClearCaptionTimers();
+  _tabrizSubHideAll();
+  // 旧 caption 占位 DOM（已 display:none，再清防御）
+  if(_tabrizCap1) _tabrizCap1.classList.remove('show');
+  if(_tabrizCap2) _tabrizCap2.classList.remove('show');
+  // 字幕：s1（350 个结）—— 1.0s 起，停 4.5s
+  _tabrizSubShow('s1', 1000, [TABRIZ_VIDEO_STATE.V1, TABRIZ_VIDEO_STATE.V2]);
+  _tabrizSubHide('s1', 5500);
+}
+
+/* V1 自然结束 → 进 V2 */
+function _tabrizOnV1Ended(){
+  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V1) return;
+  _tabrizEnterV2State();
+}
+
+/* V1 → V2：push-in 推近到猫，一次性（约 7.7s）
+   V2 期间字幕节奏：
+   +0.8s  s2 "一个织工每天只能织一排，"  停 2.8s
+   +4.0s  s3 "一块 3×5 米的毯子，要织整整两年。"  停 2.8s
+   +6.9s（V2 末，约 15s 整）s4 "这一块，已经织了一年零四个月。"
+          这是金句，故意不淡出 —— 一直停到 V3 开始约 0.5s 后才悄悄消失，
+          让用户带着这句话看猫盯着毛线球的镜头。 */
+function _tabrizEnterV2State(){
+  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V2) return;
+  _tabrizCurState = TABRIZ_VIDEO_STATE.V2;
+  _tabrizSwitchToVideo(_tabrizV2);
+  _tabrizClearCaptionTimers();
+  _tabrizSubHideAll();
+  // s2：织工每天只能织一排
+  _tabrizSubShow('s2', 800, [TABRIZ_VIDEO_STATE.V2]);
+  _tabrizSubHide('s2', 3600);
+  // s3：3×5 米要织两年
+  _tabrizSubShow('s3', 4000, [TABRIZ_VIDEO_STATE.V2]);
+  _tabrizSubHide('s3', 6800);
+  // s4：金句，撑到 V3 中段（V3 是 loop，可能 ~3s 后被点击 → V4，
+  //     V4 进入会 clear caption timers + hideAll，因此最坏 ~3s 后被强制清空，
+  //     最好情况 s4 显示约 6s + V3 整段 ~3s ≈ 9s 沉浸）
+  _tabrizSubShow('s4', 6900, [TABRIZ_VIDEO_STATE.V2, TABRIZ_VIDEO_STATE.V3]);
+  console.log('[tabriz] V1 结束，进入 V2');
+}
+
+/* V2 自然结束 → 进 V3 */
+function _tabrizOnV2Ended(){
+  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V2) return;
+  _tabrizEnterV3State();
+}
+
+/* V2 → V3：paw 猫看毛线球，loop=true 循环，等用户点击 */
+function _tabrizEnterV3State(){
+  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V3) return;
+  _tabrizCurState = TABRIZ_VIDEO_STATE.V3;
+  if(_tabrizV3) _tabrizV3.loop = true;
+  _tabrizSwitchToVideo(_tabrizV3);
+  console.log('[tabriz] V2 结束，进入 V3（loop=true）');
+  // 显示猫爪点击热区（600ms 后浮现）
+  if(_tabrizPawHint){
+    setTimeout(()=>{
+      if(_tabrizCurState === TABRIZ_VIDEO_STATE.V3) _tabrizPawHint.classList.add('show');
+    }, 600);
+  }
+  // 30 秒无操作 → 自动触发 V4
+  _tabrizClearTimers();
+  _tabrizV3Timer = setTimeout(()=>{
+    if(_tabrizCurState === TABRIZ_VIDEO_STATE.V3){
+      console.log('[tabriz] V3 超时，自动触发 V4');
+      _tabrizEnterV4State();
+    }
+  }, TABRIZ_V3_AUTO_TIMEOUT);
+}
+
+/* 猫爪点击 → 触发 V4 */
+function _tabrizOnPawClick(e){
+  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V3) return;
+  if(e && e.preventDefault) e.preventDefault();
+  _tabrizEnterV4State();
+}
+
+/* V3 → V4：chase 猫追线 + 织机被扯（约 10.5s）
+   V4 期间字幕节奏（第二段：战争破坏了什么）：
+   +0.6s  c1 "2026 年 4 月 12 日。"（quiet）  停 3.4s
+   +3.0s  c2 "导弹擦过 Tabriz 巴扎的屋顶。"   停 4s
+   +7.5s  c3 "一根丝线、一根丝线，倒着退了回去。"
+          —— 关键：撞上 V4 末段织机被扯断、第一根线被拉走的画面（约第 7~9s）
+          c3 不在 V4 内淡出，让它跨段一直持续到 V5 中段，与"地毯解构"+"逐渐模糊"叠加情绪 */
+function _tabrizEnterV4State(){
+  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V4) return;
+  _tabrizCurState = TABRIZ_VIDEO_STATE.V4;
+  _tabrizClearTimers();
+  _tabrizClearCaptionTimers();
+  _tabrizSubHideAll();
+  // 隐藏热区
+  if(_tabrizPawHint) _tabrizPawHint.classList.remove('show');
+  // 关闭 V3 的 loop（防止重新进入场景时残留状态）
+  if(_tabrizV3) _tabrizV3.loop = false;
+  _tabrizSwitchToVideo(_tabrizV4);
+  // 第二段叙事：3 句铺陈
+  _tabrizSubShow('c1', 600,  [TABRIZ_VIDEO_STATE.V4]);
+  _tabrizSubHide('c1', 4000);
+  _tabrizSubShow('c2', 3000, [TABRIZ_VIDEO_STATE.V4]);
+  _tabrizSubHide('c2', 7000);
+  // c3 金句：对齐 V4 第 7.5s 的"线头被拉"画面，跨到 V5 才淡出
+  _tabrizSubShow('c3', 7500, [TABRIZ_VIDEO_STATE.V4, TABRIZ_VIDEO_STATE.V5]);
+  console.log('[tabriz] 进入 V4，启动第二段字幕');
+}
+
+/* V4 自然结束 → 进 V5 */
+function _tabrizOnV4Ended(){
+  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V4) return;
+  _tabrizEnterV5State();
+}
+
+/* V4 → V5：unravel 地毯解构收尾（约 14.9s）
+   同步：给 V5 video 加 .v5-blur，触发 14s 的 filter 渐变。
+   V5 期间字幕节奏（接续 V4 c3 金句）：
+   +3s  c3 淡出（让"丝线退回"在 V5 前 3s 持续覆盖解构画面 → 共显约 6s）
+   +4s  c4 "他们说，毯子烧了可以再织一块。"（quiet）  停 4s
+   +9s  c5 "但织进去的一年零四个月，回不来了。"
+        —— 不淡出，跟随视频模糊到黑，最后情绪落点 */
+function _tabrizEnterV5State(){
+  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V5) return;
+  _tabrizCurState = TABRIZ_VIDEO_STATE.V5;
+  _tabrizSwitchToVideo(_tabrizV5);
+  // 触发逐渐模糊：延 100ms 加 class，确保 transition 起点是清晰帧
+  if(_tabrizV5){
+    setTimeout(()=>{
+      if(_tabrizCurState === TABRIZ_VIDEO_STATE.V5 && _tabrizV5){
+        _tabrizV5.classList.add('v5-blur');
+      }
+    }, 100);
+  }
+  // 注意：不清空 V4 排的 c3 timer —— c3 设计为跨段持续到 V5 中段
+  // 但要清掉 c1/c2 的残余（防御）
+  if(_tabrizSubLines){
+    if(_tabrizSubLines.c1) _tabrizSubLines.c1.classList.remove('show');
+    if(_tabrizSubLines.c2) _tabrizSubLines.c2.classList.remove('show');
+  }
+  // c3 金句：进入 V5 后再持续 3s，然后淡出
+  _tabrizSubHide('c3', 3000);
+  // c4：转折 quiet
+  _tabrizSubShow('c4', 4000, [TABRIZ_VIDEO_STATE.V5]);
+  _tabrizSubHide('c4', 8000);
+  // c5：最终落点 —— 不主动 hide，让它和模糊画面一起渐黑
+  _tabrizSubShow('c5', 9000, [TABRIZ_VIDEO_STATE.V5]);
+  console.log('[tabriz] V4 结束，进入 V5（启动逐渐模糊 + 第二段尾声字幕）');
+}
+
+/* V5 自然结束 → 收尾 */
+function _tabrizOnV5Ended(){
+  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V5) return;
+  _tabrizFinishScene();
+}
+
+/* 收尾：黑屏过渡 → 自动回地图 */
+function _tabrizFinishScene(){
+  if(_tabrizCurState === TABRIZ_VIDEO_STATE.DONE) return;
+  _tabrizCurState = TABRIZ_VIDEO_STATE.DONE;
+  if(_tabrizFadeout){
+    _tabrizFadeout.classList.add('show');
+  }
+  setTimeout(()=>{
+    if(typeof returnToMap === 'function' && _tabrizCurState === TABRIZ_VIDEO_STATE.DONE){
+      returnToMap();
+    }
+  }, 1500);
+}
+
+/* 工具：清理定时器 */
+function _tabrizClearTimers(){
+  if(_tabrizV3Timer){ clearTimeout(_tabrizV3Timer); _tabrizV3Timer = null; }
+}
+function _tabrizClearCaptionTimers(){
+  _tabrizCaptionTimers.forEach(t => clearTimeout(t));
+  _tabrizCaptionTimers = [];
+}
+
+/* === 字幕调度 ===
+   _tabrizSubShow(key, atMs)：在 atMs 毫秒后显示字幕
+   _tabrizSubHide(key, atMs)：在 atMs 毫秒后隐藏字幕
+   guardState：可选，仅当切换时仍处于该状态/状态数组时才执行（防跨段串台） */
+function _tabrizSubShow(key, atMs, guardStates){
+  if(!_tabrizSubLines || !_tabrizSubLines[key]) return;
+  _tabrizCaptionTimers.push(setTimeout(()=>{
+    if(guardStates){
+      const arr = Array.isArray(guardStates) ? guardStates : [guardStates];
+      if(!arr.includes(_tabrizCurState)) return;
+    }
+    _tabrizSubLines[key].classList.add('show');
+  }, atMs));
+}
+function _tabrizSubHide(key, atMs){
+  if(!_tabrizSubLines || !_tabrizSubLines[key]) return;
+  _tabrizCaptionTimers.push(setTimeout(()=>{
+    _tabrizSubLines[key].classList.remove('show');
+  }, atMs));
+}
+/* 清空所有字幕（不清 timer，仅立即隐藏） */
+function _tabrizSubHideAll(){
+  if(!_tabrizSubLines) return;
+  Object.values(_tabrizSubLines).forEach(el => el && el.classList.remove('show'));
+}
+
+
+
 
 /* ---------- 初始化 ---------- */
 for(let i=0; i<COUNT; i++){
@@ -2180,7 +3139,7 @@ function computeSceneCamera(){
   let yCenter = 50;
   const coord = COORDINATES[currentSceneIdx];
   const mdl = coord && coord.modelId ? MODELS[coord.modelId] : null;
-  if(mdl && mdl.sampledPoints){
+  if(mdl && mdl.sampledPoints && mdl.sampledPoints.bbox){
     const b = mdl.sampledPoints.bbox;
     const s = new THREE.Vector3();
     b.getSize(s);
@@ -2216,22 +3175,36 @@ function enterScene(idx){
   smoothYaw = PANO_YAW_OFFSET;
   smoothPitch = 0;
 
-  // === 判断是否走新管线（场景 1 golestan 实体模型） ===
+  // === 判断是否走新管线（场景 1 golestan 实体模型 / 场景 2 tabriz 程序化作坊） ===
   const isGolestan = (coord.modelId === 'golestan');
   const golestanReady = isGolestan && MODELS.golestan.gltfScene;
+  const isTabriz = (coord.modelId === 'tabriz');
+
+  // 防御：进入新场景前，清理上一场景的"实体"残留（吊灯/作坊不应跨场景共存）
+  if(!isGolestan && MODELS.golestan && MODELS.golestan.frameGroup && MODELS.golestan.frameGroup.parent){
+    cleanupChandelierScene();
+  }
+  if(!isTabriz && MODELS.tabriz && MODELS.tabriz.active){
+    cleanupCarpetScene();
+  }
+
+  // 新管线统一标记：进入新管线场景（隐藏粒子系统、启用 sceneGroup）
+  const newPipelineReady = golestanReady || isTabriz;
 
   if(golestanReady){
-    // 新管线：显示完整 3D 实体模型
+    // 场景 1：吊灯实体
     const ok = enterChandelierScene();
     if(!ok){
-      // 降级：走旧粒子管线
       if(coord.modelId && coord.sceneReady) buildSceneTargets(coord.modelId);
       else buildPlaceholderTargets();
       geometry.getAttribute('aSize').needsUpdate = true;
       geometry.getAttribute('aColor').needsUpdate = true;
     }
+  } else if(isTabriz){
+    // 场景 2：地毯作坊程序化场景
+    enterCarpetScene();
   } else {
-    // 旧管线（场景 2 及其他）
+    // 旧管线（其他粒子场景）
     if(coord.modelId && coord.sceneReady) buildSceneTargets(coord.modelId);
     else buildPlaceholderTargets();
     geometry.getAttribute('aSize').needsUpdate = true;
@@ -2241,7 +3214,7 @@ function enterScene(idx){
   // 显示加载状态
   if(modelLoadingEl){
     const mdl = coord.modelId ? MODELS[coord.modelId] : null;
-    if(mdl && !mdl.sampledPoints && !mdl.loadFailed && !golestanReady){
+    if(mdl && !mdl.sampledPoints && !mdl.loadFailed && !newPipelineReady){
       modelLoadingEl.classList.add('show');
     } else {
       modelLoadingEl.classList.remove('show');
@@ -2249,7 +3222,7 @@ function enterScene(idx){
   }
 
   // 非新管线场景：生成地面散落位置
-  if(!golestanReady){
+  if(!newPipelineReady){
     buildSceneGroundPositions();
     for(let i=0; i<COUNT; i++){
       positions[i*3]   = scatteredPos[i*3];
@@ -2267,34 +3240,49 @@ function enterScene(idx){
   body.classList.add('scene-mode');
   nextHint.classList.remove('show');
   storyEl.classList.remove('show');
+  storyEl.classList.remove('collapse-story');  // 防御：确保进场不残留崩坏样式
+  // 防御：烧灼层 / dimSphere 状态归零（万一上次没清干净）
+  if(panoBurnSphere){
+    panoBurnSphere.visible = false;
+    panoBurnSphere.material.uniforms.uProgress.value = -0.2;
+    // 根据当前场景设置烧灼方向：tabriz 从地面向上、其他默认从穹顶向下
+    if(coord.modelId === 'tabriz'){
+      panoBurnSphere.material.uniforms.uBurnDir.value.set(0, -1, 0);
+    } else {
+      panoBurnSphere.material.uniforms.uBurnDir.value.set(0, 1, 0);
+    }
+  }
 
   // 全景图 skybox
   const sceneIdForPano = coord.modelId || coord.id;
   currentPanoId = sceneIdForPano;
   if(coord.panoUrl) loadPanoForScene(sceneIdForPano, coord.panoUrl);
   const panoTex = panoTextures[sceneIdForPano];
-  if(panoTex && panoTex !== 'loading'){
+  if(coord.panoUrl && panoTex && panoTex !== 'loading'){
     scene.background = panoTex;
     panoDimSphere.visible = true;
-    // golestan 场景降低暗化（让宫殿全景更亮）
-    panoDimSphere.material.opacity = golestanReady ? 0.15 : 0.55;
+    // 新管线场景降低暗化（让全景更亮）
+    panoDimSphere.material.opacity = newPipelineReady ? 0.18 : 0.55;
     const sceneBgEl = document.querySelector('.scene-bg');
     if(sceneBgEl) sceneBgEl.style.display = 'none';
     renderer.setClearColor(0x000000, 1);
   } else {
-    panoDimSphere.visible = true;
-    panoDimSphere.material.opacity = golestanReady ? 0.15 : 0.55;
-    renderer.setClearColor(0x000000, 1);
+    // 无 panoUrl（如 Tabriz）：靠 DOM 海报图层 .tabriz-bg-layer 充当远景
+    scene.background = null;
+    panoDimSphere.visible = !coord.modelId;  // Tabriz 不要 dim sphere
+    panoDimSphere.material.opacity = newPipelineReady ? 0.18 : 0.55;
+    // Tabriz 特别处理：用透明清屏，让底下 DOM 海报背景层透上来
+    if(sceneIdForPano === 'tabriz'){
+      renderer.setClearColor(0x000000, 0);
+    } else {
+      renderer.setClearColor(0x000000, 1);
+    }
   }
   // 启用反光光点（仅 golestan 场景）
   sparkleGroup.visible = (sceneIdForPano === 'golestan');
   // 根据屏幕宽高比动态调整 FOV
-  // 竖屏手机 aspect≈0.46 → 需要更大 FOV 才能看到足够的全景范围
-  // 桌面 aspect≈1.78 → 较小 FOV 即可
-  if(golestanReady){
+  if(newPipelineReady){
     const aspect = window.innerWidth / window.innerHeight;
-    // 基准：aspect=1.0 时 FOV=65；越窄(竖屏) FOV 越大，越宽(横屏) FOV 越小
-    // 手机竖屏 aspect≈0.46 → FOV≈90；桌面 aspect≈1.78 → FOV≈50
     const baseFov = 65;
     const fov = Math.round(baseFov / Math.max(aspect, 0.4));
     camera.fov = THREE.MathUtils.clamp(fov, 45, 100);
@@ -2305,13 +3293,19 @@ function enterScene(idx){
 
   // 相机
   if(golestanReady){
-    // 吊灯在世界原点(0,0,0)
-    // 相机在水平圆轨道上，稍低于吊灯，仰视
-    // 初始位置：Z轴正方向，距离 orbitRadius
+    // 吊灯在世界原点(0,0,0)；相机在水平圆轨道上、稍低于吊灯仰视
     const orbitRadius = 100;
-    const orbitY = -35; // 相机更低，仰视更明显
+    const orbitY = -35;
     camera.position.set(0, orbitY, orbitRadius);
-    cameraTarget.set(0, 0, 0); // 始终看向原点
+    cameraTarget.set(0, 0, 0);
+    camera.lookAt(cameraTarget);
+  } else if(isTabriz){
+    // 织机在世界原点附近、用户站在它正前方稍偏低，平视
+    // 织机高度 LOOM_H=160，相机距 ~140，正中央平视即可看到织机全貌
+    const orbitRadius = 145;
+    const orbitY = -10;  // 略低于织机中心，仰视感
+    camera.position.set(0, orbitY, orbitRadius);
+    cameraTarget.set(0, 0, 0);
     camera.lookAt(cameraTarget);
   } else {
     const sceneCamSetup = computeSceneCamera();
@@ -2329,9 +3323,17 @@ function enterScene(idx){
   if(coord.sceneReady){
     storyEl.querySelector('.story-card-inner').innerHTML = buildStoryHTML(coord.story, coord);
     placeholderEl.classList.remove('show');
-    if(golestanReady){
-      // 新管线：提示"点击屏幕"触发崩塌
-      pressHintEl.innerHTML = 'tap to shatter <span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+    if(newPipelineReady){
+      // 新管线（吊灯/地毯）：进场立即显示介绍文案
+      storyEl.classList.add('show');
+      // 启用自动慢速旋转
+      autoRotateActive = true;
+      autoRotateYaw = 0;
+      autoRotateSpeed = AUTO_ROTATE_SPEED_BASE;
+      _autoRotateBoostStart = 0;
+      // 触发提示文案：吊灯="tap to shatter"，地毯="tap to interrupt"
+      const hintWord = isTabriz ? 'interrupt' : 'shatter';
+      pressHintEl.innerHTML = `tap to ${hintWord} <span class="dot"></span><span class="dot"></span><span class="dot"></span>`;
       setTimeout(()=>{
         if(mode===MODE.SCENE) pressHintEl.classList.add('show');
       }, 1200);
@@ -2371,6 +3373,45 @@ function buildStoryHTML(s, coord){
   return html;
 }
 
+/* 场景 nextHint（continue →）点击：
+ * 跳过"回地图再点 TAP TO ARRIVE"的环节，直接进入下一个已解锁场景。
+ * 如果当前已经是最后一个场景 / 下一个还没解锁 / 不在场景模式，则回退为 returnToMap。 */
+function chainToNextScene(){
+  if(mode !== MODE.SCENE) return;
+  // 推进解锁进度（和 returnToMap 同一套逻辑）
+  if(currentSceneIdx >= 0 && !progress[currentSceneIdx]){
+    progress[currentSceneIdx] = true;
+    if(unlockedIdx === currentSceneIdx && unlockedIdx < COORDINATES.length - 1){
+      unlockedIdx++;
+    }
+  }
+  // 下一个场景：currentSceneIdx + 1（必须存在且已解锁）
+  const nextIdx = currentSceneIdx + 1;
+  if(nextIdx >= COORDINATES.length || nextIdx > unlockedIdx){
+    // 没有下一个 / 未解锁 → 走回地图流程（兜底）
+    returnToMap();
+    return;
+  }
+
+  // 清理当前场景的"实体"残留
+  const wasGolestan = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
+  if(wasGolestan) cleanupChandelierScene();
+  const wasTabriz = COORDINATES[currentSceneIdx]?.modelId === 'tabriz' && MODELS.tabriz.active;
+  if(wasTabriz) cleanupCarpetScene();
+
+  // 隐藏当前 UI 残留
+  nextHint.classList.remove('show');
+  storyEl.classList.remove('show');
+  storyEl.classList.remove('collapse-story');
+  placeholderEl.classList.remove('show');
+  pressHintEl.classList.remove('show');
+
+  // 直接进入下一个场景（沿用 enterScene 的完整入口）
+  // 注意：enterScene 内部已处理 mode/body class/sceneState/相机 等所有状态
+  enterScene(nextIdx);
+  console.log('[chain] 链式进场 →', COORDINATES[nextIdx]?.name);
+}
+
 function returnToMap(){
   if(mode !== MODE.SCENE) return;
   if(currentSceneIdx >= 0 && !progress[currentSceneIdx]){
@@ -2383,6 +3424,10 @@ function returnToMap(){
   // 清理场景 1 新管线（如果活跃）
   const wasGolestan = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
   if(wasGolestan) cleanupChandelierScene();
+  // 清理场景 2 地毯作坊（如果活跃）
+  const wasTabriz = COORDINATES[currentSceneIdx]?.modelId === 'tabriz' && MODELS.tabriz.active;
+  if(wasTabriz) cleanupCarpetScene();
+
 
   mode = MODE.TRANSITION;
   sceneState = SCENE_STATE.IDLE;
@@ -2480,6 +3525,22 @@ let dragStartX = 0, dragStartY = 0;
 let dragStartYaw = 0;
 let pointerActive = false;
 let pressPointerStartX = 0, pressPointerStartY = 0;
+
+// 进入场景后的"自动慢速旋转"：让用户一进来就感知空间可旋转，用户首次操作即停止
+let autoRotateActive = false;
+let autoRotateYaw = 0;            // 累计的自动旋转角度（弧度），叠加到 camYaw 上
+const AUTO_ROTATE_SPEED_BASE = 0.06;  // 进场默认速度（弧度/秒，约 3.4°/秒）
+let autoRotateSpeed = AUTO_ROTATE_SPEED_BASE;
+// 碎裂加速过冲：起爆瞬间从 base 飙到 peak，1.2s 内回落到 settle
+let _autoRotateBoostStart = 0;     // 0 表示无 boost；>0 表示 boost 起始 performance.now()
+const AUTO_ROTATE_BOOST_PEAK   = 0.6;  // 峰值（弧度/秒，约 34°/秒，3 倍冲击感）
+const AUTO_ROTATE_BOOST_SETTLE = 0.18; // 稳态（弧度/秒，约 10°/秒，3 倍 base）
+const AUTO_ROTATE_BOOST_DUR    = 1200; // 过冲持续时间（ms）
+
+/* ===================================================================
+ * Tabriz：旧 3D 相机管线已废弃（改为 DOM 视频驱动，无相机控制）
+ * =================================================================== */
+
 
 // 平滑旋转：camYaw 是目标值（拖拽/陀螺仪即时更新），smoothYaw 做插值跟随
 let smoothYaw = 0;
@@ -2600,9 +3661,10 @@ canvas.addEventListener('pointerdown', (e)=>{
   dragStartYaw = camYaw;
 
   if(mode === MODE.SCENE){
-    // 场景 1 新管线：不需要长按
+    // 新管线（吊灯/地毯）：不需要长按聚合粒子
     const isGolestanNew = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
-    if(!isGolestanNew){
+    const isTabrizNew = COORDINATES[currentSceneIdx]?.modelId === 'tabriz' && MODELS.tabriz.active;
+    if(!isGolestanNew && !isTabrizNew){
       pointerActive = true;
       pressPointerStartX = e.clientX; pressPointerStartY = e.clientY;
       sceneStartPress();
@@ -2613,6 +3675,11 @@ window.addEventListener('pointermove', (e)=>{
   if(!dragging) return;
   const dx = e.clientX - dragStartX;
   const dy = e.clientY - dragStartY;
+
+  // 用户产生真实拖拽位移即关闭自动旋转（单击 tap 不会触发，因为 tap 几乎无位移）
+  if(autoRotateActive && (Math.abs(dx) > 4 || Math.abs(dy) > 4)){
+    autoRotateActive = false;
+  }
 
   if(mode === MODE.SCENE && sceneState === SCENE_STATE.GATHERING){
     const moved = Math.hypot(e.clientX - pressPointerStartX, e.clientY - pressPointerStartY);
@@ -2661,6 +3728,9 @@ window.addEventListener('pointerup', (e)=>{
       }
     }
   }
+
+  // 场景 2（Tabriz 视频版）：点击不通过 raycaster，直接由 DOM 热区 .tabriz-paw-hint 监听
+
 
   if(pointerActive){
     pointerActive = false;
@@ -2740,7 +3810,8 @@ window.addEventListener('keyup', (e)=>{ keys[e.code] = false; });
 // 这里暂时在移动端使用"前倾/后仰"的陀螺仪 beta 角加速前进
 
 backBtn.addEventListener('click', returnToMap);
-nextHint.addEventListener('click', returnToMap);
+// 场景 nextHint（continue →）：直接链式进入下一个已解锁场景，跳过"回地图再点 TAP TO ARRIVE"
+nextHint.addEventListener('click', chainToNextScene);
 
 /* ================================================================
  *  陀螺仪
@@ -2839,16 +3910,44 @@ function tick(){
   // 全景反光光点更新
   if(sparkleGroup.visible){
     sparkleMat.uniforms.uTime.value = time;
-    const targetOp = (mode === MODE.SCENE) ? 0.85 : 0;
-    sparkleMat.uniforms.uOpacity.value += (targetOp - sparkleMat.uniforms.uOpacity.value) * 0.05;
+
+    // 相机角速度（基于 smoothYaw + smoothPitch 帧间变化）
+    if(!sparkleInited){
+      sparkleLastYaw = smoothYaw;
+      sparkleLastPitch = smoothPitch;
+      sparkleInited = true;
+    }
+    const dYaw   = Math.abs(smoothYaw   - sparkleLastYaw);
+    const dPitch = Math.abs(smoothPitch - sparkleLastPitch);
+    sparkleLastYaw = smoothYaw;
+    sparkleLastPitch = smoothPitch;
+    // 灵敏度更高：×120（之前 ×40），轻微拖拽就能触发
+    const rawSpeed = (dYaw + dPitch) * 120;
+    const target = Math.min(rawSpeed, 1.6);
+    // 上升快、下降慢
+    if(target > sparkleMotion){
+      sparkleMotion += (target - sparkleMotion) * 0.4;
+    } else {
+      sparkleMotion += (target - sparkleMotion) * 0.04;
+    }
+    // 静止时给一点 idle baseline（0.08），让用户偶尔能瞥到光点
+    const motionLevel = Math.max(sparkleMotion, 0.08);
+
+    const targetOp = (mode === MODE.SCENE) ? 1.0 : 0;
+    sparkleMat.uniforms.uOpacity.value += (targetOp - sparkleMat.uniforms.uOpacity.value) * 0.06;
+    sparkleMat.uniforms.uMotion.value = motionLevel;
+
+    // B 层大颗星芒：opacity 主要由运动驱动 + 视角朝向
     const camDir = new THREE.Vector3();
     for(const spr of flareSprites){
       camDir.copy(spr.position).sub(camera.position).normalize();
       const facing = THREE.MathUtils.clamp(camDir.dot(spr.userData.dir) * 0.5 + 0.5, 0, 1);
-      const sharp = Math.pow(facing, 4);
-      const twinkle = 0.6 + 0.4 * Math.sin(time * 1.2 + spr.userData.seed * 6.28);
-      spr.material.opacity = sharp * twinkle * 0.9;
-      const s = spr.userData.baseScale * (0.85 + sharp * 0.35);
+      const sharp = Math.pow(facing, 2.0);
+      const twinkle = 0.55 + 0.45 * Math.sin(time * 1.4 + spr.userData.seed * 6.28);
+      const fast = Math.sin(time * 4.2 + spr.userData.fastSeed * 12.57);
+      const flash = Math.pow(Math.max(fast, 0), 6) * motionLevel;
+      spr.material.opacity = sharp * (twinkle * 0.6 + flash * 0.8) * motionLevel * targetOp;
+      const s = spr.userData.baseScale * (0.9 + sharp * 0.15 + flash * 0.4);
       spr.scale.setScalar(s);
     }
   }
@@ -2934,15 +4033,31 @@ function tick(){
       camera.lookAt(lookTarget);
 
     } else if(mode === MODE.SCENE){
-      // 目标 yaw/pitch：陀螺仪 + 拖动叠加（手机上也能手指左右滑动切换视角）
-      const targetYaw   = (useGyro ? gyroYaw + camYaw : camYaw) + PANO_YAW_OFFSET;
+      // 自动慢速旋转：进场时启用，用户首次拖拽时关闭
+      if(autoRotateActive && !dragging){
+        // 检查是否处于碎裂 boost 期间
+        if(_autoRotateBoostStart > 0){
+          const elapsed = performance.now() - _autoRotateBoostStart;
+          if(elapsed < AUTO_ROTATE_BOOST_DUR){
+            // ease-out：从 PEAK 衰减到 SETTLE（指数缓动，前期冲击强、后期平滑）
+            const t = elapsed / AUTO_ROTATE_BOOST_DUR;
+            const ease = 1 - Math.pow(1 - t, 2);
+            autoRotateSpeed = AUTO_ROTATE_BOOST_PEAK + (AUTO_ROTATE_BOOST_SETTLE - AUTO_ROTATE_BOOST_PEAK) * ease;
+          } else {
+            autoRotateSpeed = AUTO_ROTATE_BOOST_SETTLE;
+          }
+        }
+        autoRotateYaw += autoRotateSpeed * dt / 60;
+      }
+      // 目标 yaw/pitch：陀螺仪 + 拖动叠加（手机上也能手指左右滑动切换视角） + 自动旋转
+      const targetYaw   = (useGyro ? gyroYaw + camYaw : camYaw) + PANO_YAW_OFFSET + autoRotateYaw;
       const targetPitch = useGyro ? gyroPitch : 0;
 
       const lerpSpeed = 0.10;
       smoothYaw   += (targetYaw   - smoothYaw)   * lerpSpeed;
       smoothPitch += (targetPitch - smoothPitch) * lerpSpeed;
 
-      // 判断是否是吊灯场景
+      // 判断是否是新管线（吊灯）场景；Tabriz 视频版无 3D 相机
       const isGolestanCam = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
       if(isGolestanCam){
         // 吊灯在原点，相机在水平圆轨道上微仰视
@@ -3274,6 +4389,8 @@ function tick(){
     updateChandelierCollapse(dt, time);
   }
 
+  // 场景 2 Tabriz 视频版：每帧无需推进（视频自己播）
+
   // 始终用标准渲染（保持 canvas alpha 透明，CSS 背景可见）
   renderer.render(scene, camera);
 
@@ -3292,7 +4409,7 @@ function tick(){
 function onResize(){
   renderer.setSize(window.innerWidth, window.innerHeight);
   camera.aspect = window.innerWidth / window.innerHeight;
-  // 如果在 golestan 吊灯场景，动态调整 FOV
+  // 如果在 golestan 新管线场景，动态调整 FOV（Tabriz 视频版无 3D 相机）
   const isGolestan = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
   if(mode === MODE.SCENE && isGolestan){
     const aspect = camera.aspect;
