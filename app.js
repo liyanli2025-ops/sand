@@ -4414,6 +4414,12 @@ function tick(){
   particleMaterial.uniforms.uWobble.value += (targetWobble - particleMaterial.uniforms.uWobble.value) * 0.05;
 
   // —— 粒子积分 ——
+  // 性能优化：主粒子系统（COUNT=15万颗）不可见时整个跳过——
+  // 之前每帧空转 15 万次循环（CPU 满负荷），即使 GPU 不渲染。
+  // 玫瑰宫场景全程 points.visible = false，可以省 15 万次/帧。
+  if(!points.visible){
+    // 跳过粒子积分。posAttr.needsUpdate 也不需要置 true（顶点不更新）
+  } else {
   for(let i=0; i<COUNT; i++){
     const i3 = i*3;
     // —— 流沙崩解：等待中的粒子仅微微颤动，不参与后续积分 ——
@@ -4615,6 +4621,7 @@ function tick(){
   }
 
   posAttr.needsUpdate = true;
+  } // end if(points.visible) — 主粒子积分块
 
   // —— 琴的 Y 轴慢速旋转：仅在沙雕态（HELD/FORMED）启用 ——
   // RELEASING：冻结旋转角度（松手瞬间朝向不变，粒子原地崩散）
