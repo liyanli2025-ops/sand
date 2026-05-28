@@ -4052,6 +4052,26 @@ function setupGyro(){
     window.addEventListener('click', retryOnGesture, { once: true });
   }
 }
+/* ================================================================
+ *  陀螺仪灵敏度曲线：小动作压制 + 大动作放开
+ *  目标：手机静止时画面纹丝不动（治"飘"），转头时自然跟随，转身时完整 360°
+ * ================================================================ */
+// 死区（弧度，约 1°）：偏移小于这个值视为静止，画面完全不动
+const GYRO_DEADZONE = Math.PI / 180 * 1.0;
+// 指数曲线：input^GYRO_CURVE_POW * sign，<5° 几乎不动，>30° 接近 1:1
+const GYRO_CURVE_POW = 1.6;
+// Pitch（前后）允许范围：±60°，能完整仰头看吊顶/低头看地板
+const GYRO_PITCH_LIMIT = Math.PI / 3;  // 60°
+function applyGyroCurve(rawRad){
+  const sign = rawRad >= 0 ? 1 : -1;
+  const absR = Math.abs(rawRad);
+  if(absR < GYRO_DEADZONE) return 0;            // 死区：完全静止
+  // 死区外：把 [死区, π] 映射到 [0, 1]，做指数曲线，再映射回 [0, π]
+  const t = (absR - GYRO_DEADZONE) / (Math.PI - GYRO_DEADZONE);
+  const curved = Math.pow(t, GYRO_CURVE_POW);   // 小动作被压扁，大动作保留
+  return sign * curved * Math.PI;
+}
+
 function onDeviceOrientation(e){
   // alpha 可能为 null（某些 Android 浏览器或 iframe 嵌入场景），
   // 此时降级用 gamma（左右旋转角，左右倾时变化）作为 yaw 来源
@@ -4061,13 +4081,14 @@ function onDeviceOrientation(e){
     if(e.gamma === null || e.gamma === undefined) return;
     alphaSource = e.gamma * 2; // 放大灵敏度
   }
-  // —— Yaw（alpha）：左右转动 ——
+  // —— Yaw（alpha）：左右转动，无范围限制（完整 360°）——
   const a = alphaSource;
   if(gyroYawOffset === null) gyroYawOffset = a;
-  let yaw = (a - gyroYawOffset) * Math.PI / 180;
-  while(yaw > Math.PI) yaw -= 2*Math.PI;
-  while(yaw < -Math.PI) yaw += 2*Math.PI;
-  const newGyroYaw = -yaw;
+  let yawRaw = (a - gyroYawOffset) * Math.PI / 180;
+  while(yawRaw > Math.PI) yawRaw -= 2*Math.PI;
+  while(yawRaw < -Math.PI) yawRaw += 2*Math.PI;
+  const yawCurved = applyGyroCurve(yawRaw);     // 指数曲线 + 死区
+  const newGyroYaw = -yawCurved;
   // 检测陀螺仪显著变化 → 视为用户主动操作，关闭自动旋转 + 刷新静止计时
   if(Math.abs(newGyroYaw - gyroYaw) > 0.01){
     if(autoRotateActive) autoRotateActive = false;
@@ -4075,14 +4096,15 @@ function onDeviceOrientation(e){
   }
   gyroYaw = newGyroYaw;
 
-  // —— Pitch（beta）：前后倾斜 ——
+  // —— Pitch（beta）：前后倾斜，±60° 完整开放 ——
   // beta: 0=平放, 90=竖直, 负值=向后仰
-  // 基准：手机自然手持约 60~70°，偏移后得到 ±30° 的俯仰范围
   const b = e.beta || 0;
   if(gyroPitchOffset === null) gyroPitchOffset = b;
-  let pitch = (b - gyroPitchOffset) * Math.PI / 180;
-  pitch = Math.max(-0.5, Math.min(0.5, pitch)); // 限制 ±0.5 rad（约 ±28°）
-  gyroPitch = -pitch;
+  let pitchRaw = (b - gyroPitchOffset) * Math.PI / 180;
+  // 死区 + 限幅（不做指数曲线：pitch 范围本来就小，曲线会让仰头特别累）
+  if(Math.abs(pitchRaw) < GYRO_DEADZONE) pitchRaw = 0;
+  pitchRaw = Math.max(-GYRO_PITCH_LIMIT, Math.min(GYRO_PITCH_LIMIT, pitchRaw));
+  gyroPitch = -pitchRaw;
 }
 setupGyro();
 
@@ -4304,7 +4326,7 @@ function tick(){
       const targetYaw   = (useGyro ? gyroYaw + camYaw : camYaw) + PANO_YAW_OFFSET + autoRotateYaw;
       const targetPitch = useGyro ? gyroPitch : 0;
 
-      const lerpSpeed = 0.10;
+      const lerpSpeed = 0.08;
       smoothYaw   += (targetYaw   - smoothYaw)   * lerpSpeed;
       smoothPitch += (targetPitch - smoothPitch) * lerpSpeed;
 
