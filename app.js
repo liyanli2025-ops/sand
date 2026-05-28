@@ -1076,8 +1076,10 @@ const sparklePoints = new THREE.Points(sparkleGeo, sparkleMat);
 sparklePoints.frustumCulled = false;
 sparkleGroup.add(sparklePoints);
 
-// —— B. 大颗星芒（Sprite，约 32 颗，烫金大颗给镜宫加奢华感）——
-const flareCount = 32;
+// —— B. 大颗星芒（Sprite，约 14 颗，烫金颗给镜宫加奢华感）——
+//   原 32 颗 80~150 太多太大、运动时一堆十字花显假；
+//   改为 14 颗 40~80 适中尺寸，星芒更克制、像真的镜面强反光点
+const flareCount = 14;
 const flareSprites = [];
 for(let i = 0; i < flareCount; i++){
   const u = Math.random(), v = 0.20 + Math.random() * 0.65;
@@ -1096,8 +1098,8 @@ for(let i = 0; i < flareCount; i++){
   });
   const spr = new THREE.Sprite(sprMat);
   spr.position.set(x, y, z);
-  // 加大：80~150（之前 60~110）让大颗星芒更醒目
-  spr.scale.setScalar(80 + Math.random() * 70);
+  // 缩小：40~80（之前 80~150）让大颗星芒不再喧宾夺主
+  spr.scale.setScalar(40 + Math.random() * 40);
   spr.userData = {
     dir: new THREE.Vector3(-x, -y, -z).normalize(),
     seed: Math.random() * 100,
@@ -4003,6 +4005,7 @@ function tick(){
     sparkleMat.uniforms.uMotion.value = motionLevel;
 
     // B 层大颗星芒：opacity 主要由运动驱动 + 视角朝向
+    //   运动越快越闪、闪光时尺寸放大幅度收敛（避免拖动时一堆十字大花，显假）
     const camDir = new THREE.Vector3();
     for(const spr of flareSprites){
       camDir.copy(spr.position).sub(camera.position).normalize();
@@ -4012,7 +4015,8 @@ function tick(){
       const fast = Math.sin(time * 4.2 + spr.userData.fastSeed * 12.57);
       const flash = Math.pow(Math.max(fast, 0), 6) * motionLevel;
       spr.material.opacity = sharp * (twinkle * 0.6 + flash * 0.8) * motionLevel * targetOp;
-      const s = spr.userData.baseScale * (0.9 + sharp * 0.15 + flash * 0.4);
+      // 闪光时尺寸放大幅度从 ×1.45 收敛到 ×1.18，避免运动瞬间"爆开"成大十字花
+      const s = spr.userData.baseScale * (0.92 + sharp * 0.10 + flash * 0.16);
       spr.scale.setScalar(s);
     }
   }
