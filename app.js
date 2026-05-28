@@ -919,8 +919,12 @@ sparkleGroup.visible = false;
 sparkleGroup.renderOrder = -5;
 scene.add(sparkleGroup);
 
-// —— A. 密集小光点（球面分布，约 480 颗，让镜宫更富丽堂皇）——
-const SPARKLE_COUNT = 480;
+// —— A. 密集小光点（球面分布，让镜宫更富丽堂皇）
+//    480 颗"原始组合"（大/中/小都有，奠定富丽堂皇的层次感）
+//    + 1200 颗纯小颗加密（让画面更细腻闪烁，不增加大颗）
+const SPARKLE_BASE = 480;          // 原来的层次组合
+const SPARKLE_DENSE = 1200;        // 新增的纯小颗加密层
+const SPARKLE_COUNT = SPARKLE_BASE + SPARKLE_DENSE;
 const SPARKLE_RADIUS = 900;
 const sparkleGeo = new THREE.BufferGeometry();
 const sparklePos = new Float32Array(SPARKLE_COUNT * 3);
@@ -946,11 +950,17 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
   sparkleDir[i*3+1] = -ny;
   sparkleDir[i*3+2] = -nz;
   sparkleSeed[i] = Math.random() * 100;
-  // 富丽堂皇配比：大颗更多更大，整体加密加亮
-  const r = Math.random();
-  if(r < 0.22)      sparkleSize[i] = 22 + Math.random() * 12;   // 大颗（22% / 22~34）
-  else if(r < 0.62) sparkleSize[i] = 13 + Math.random() * 8;    // 中颗（40% / 13~21）
-  else              sparkleSize[i] = 6 + Math.random() * 6;     // 小颗（38% / 6~12）
+
+  if(i < SPARKLE_BASE){
+    // 前 480 颗：保留原"富丽堂皇"层次配比
+    const r = Math.random();
+    if(r < 0.22)      sparkleSize[i] = 22 + Math.random() * 12;   // 大颗（22% / 22~34）
+    else if(r < 0.62) sparkleSize[i] = 13 + Math.random() * 8;    // 中颗（40% / 13~21）
+    else              sparkleSize[i] = 6 + Math.random() * 6;     // 小颗（38% / 6~12）
+  } else {
+    // 后 1200 颗：全部小颗（3~8 范围），让镜面像被无数细密水晶覆盖
+    sparkleSize[i] = 3 + Math.random() * 5;
+  }
 }
 sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
 sparkleGeo.setAttribute('aDir',     new THREE.BufferAttribute(sparkleDir, 3));
@@ -994,7 +1004,8 @@ const sparkleMat = new THREE.ShaderMaterial({
       // 闪光瞬间放大颗粒（仅运动时）
       float sizeBoost = 1.0 + vFlash * 0.8;
       gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0));
-      gl_PointSize = max(gl_PointSize, 4.0);
+      // 最小尺寸下调到 1.5px：让加密的小颗保持"细密针尖感"，不被强制放大
+      gl_PointSize = max(gl_PointSize, 1.5);
       gl_Position = projectionMatrix * mvPos;
     }
   `,
