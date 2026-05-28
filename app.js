@@ -932,10 +932,10 @@ scene.add(sparkleGroup);
 
 // —— A. 密集小光点（球面分布，让镜宫更富丽堂皇）
 //    480 颗"原始组合"（大/中/小都有，奠定富丽堂皇的层次感）
-//    + 3200 颗纯小颗加密（让画面更细腻闪烁，不增加大颗）
-//    总计 3680 颗：单 drawcall, 不增加 fill rate（小颗 size≈1.5~4）
+//    + 8000 颗纯小颗加密（让画面更细腻闪烁，不增加大颗）
+//    总计 8480 颗：单 drawcall, 不增加 fill rate（小颗 size≈2~6）
 const SPARKLE_BASE = 480;          // 原来的层次组合
-const SPARKLE_DENSE = 3200;        // 新增的纯小颗加密层（更"满天繁星"）
+const SPARKLE_DENSE = 8000;        // 新增的纯小颗加密层（满天繁星·密集版）
 const SPARKLE_COUNT = SPARKLE_BASE + SPARKLE_DENSE;
 const SPARKLE_RADIUS = 900;
 const sparkleGeo = new THREE.BufferGeometry();
