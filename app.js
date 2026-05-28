@@ -27,7 +27,20 @@ function dismissSplash(){
   // 立即隐藏 scene-bg（CSS 背景图是工作室的，不要显示）
   const sceneBgEl = document.querySelector('.scene-bg');
   if(sceneBgEl) sceneBgEl.style.display = 'none';
-  // 淡出完成后彻底移除 DOM（释放视频内存），然后自动进入吊灯场景
+
+  // —— 让 #stage 在 splash 淡出阶段就开始渐入，避免中间黑场 ——
+  //    splash 0.7s 淡出 + #stage 1.0s 渐入，时间重叠形成"叠化转场"
+  const stageEl = document.getElementById('stage');
+  if(stageEl){
+    // 立即触发 1.0s 透明度渐入（CSS transition: opacity 1.0s ease）
+    requestAnimationFrame(() => { stageEl.classList.add('scene-fade-in'); });
+  }
+
+  // 立即启动场景加载逻辑（不等 splash 完全消失）
+  // splash 此刻还在淡出，但底下镜宫已经开始构建 + 渐入，用户视觉上是"叠化"而非"黑场"
+  autoEnterGolestan();
+
+  // 800ms 后清理 splash DOM（此时 fade-out 0.7s 已完成）
   setTimeout(() => {
     if(splashEl && splashEl.parentNode){
       splashVideo.pause();
@@ -35,9 +48,7 @@ function dismissSplash(){
       splashVideo.load();
       splashEl.parentNode.removeChild(splashEl);
     }
-    // 自动进入场景 1
-    autoEnterGolestan();
-  }, 1500);
+  }, 800);
 }
 
 if(splashEnterBtn){
