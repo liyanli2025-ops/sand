@@ -304,6 +304,9 @@ function resumeCollapseFromDirectory(){
 
   /* —— 清理暂停态自转的 userData，让 mixer 重新接管节点 quaternion —— */
   mdlG._pauseSpinElapsed = undefined;
+  /* —— 清理减速窗口状态，让 mixer 恢复全速跑（resume 后碎片继续爆炸） —— */
+  mdlG._collapseDecayFactor = undefined;
+  mdlG._collapseDecayStartTime = null;
   if(mdlG._spinTargets && mdlG._spinTargets.length){
     for(let i = 0; i < mdlG._spinTargets.length; i++){
       const o = mdlG._spinTargets[i];

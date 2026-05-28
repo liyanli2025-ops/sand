@@ -2722,23 +2722,40 @@ function updateChandelierCollapse(dt, time){
 
   const elapsed = (performance.now() - collapseStartTime) / 1000;
 
-  // ========== 目录定格检测 ==========
-  // 当 mixer 时间达到 mdlG._collapsePauseT 时，进入暂停态、激活目录
+  // ========== 目录定格检测（带减速过渡） ==========
+  // 当 mixer 时间达到 mdlG._collapsePauseT 时，进入"减速窗口"——
+  // mixer 速度从 1.0 → 0 在 PAUSE_DECAY_SEC 秒内平滑衰减（先快后慢的 ease-out），
+  // 减速期间碎片继续向外飞但越来越慢；速度归 0 后再调 pauseCollapseForDirectory()
+  // 进入完全暂停态。这样避免"位移瞬间冻结"的突兀感。
+  const PAUSE_DECAY_SEC = 1.5;
   if(!mdlG._collapseDirectoryReady && mdlG._collapsePauseT && shardMixer){
-    if(shardMixer.time >= mdlG._collapsePauseT){
-      if(typeof pauseCollapseForDirectory !== 'function'){
-        console.error('[app] pauseCollapseForDirectory 未定义，directory.js 可能加载失败');
-        mdlG._collapseDirectoryReady = true;
-        mdlG._collapsePauseT = null;
+    if(shardMixer.time >= mdlG._collapsePauseT && !mdlG._collapseDecayStartTime){
+      // 进入减速窗口
+      mdlG._collapseDecayStartTime = performance.now();
+      console.log('[shard] 进入减速窗口，', PAUSE_DECAY_SEC, 's 内 mixer 速度从 1→0');
+    }
+    if(mdlG._collapseDecayStartTime){
+      const decayElapsed = (performance.now() - mdlG._collapseDecayStartTime) / 1000;
+      const tNorm = Math.min(decayElapsed / PAUSE_DECAY_SEC, 1.0);
+      // ease-out 平方衰减：先快后慢，最后温柔停下
+      mdlG._collapseDecayFactor = (1 - tNorm) * (1 - tNorm);
+      if(tNorm >= 1.0){
+        // 减速完成：正式进入暂停态
+        mdlG._collapseDecayFactor = 0;
+        if(typeof pauseCollapseForDirectory !== 'function'){
+          console.error('[app] pauseCollapseForDirectory 未定义，directory.js 可能加载失败');
+          mdlG._collapseDirectoryReady = true;
+          mdlG._collapsePauseT = null;
+          return;
+        }
+        try { pauseCollapseForDirectory(); }
+        catch(e){
+          console.error('[app] pauseCollapseForDirectory 抛错:', e && e.message);
+          mdlG._collapseDirectoryReady = true;
+          mdlG._collapsePauseT = null;
+        }
         return;
       }
-      try { pauseCollapseForDirectory(); }
-      catch(e){
-        console.error('[app] pauseCollapseForDirectory 抛错:', e && e.message);
-        mdlG._collapseDirectoryReady = true;
-        mdlG._collapsePauseT = null;
-      }
-      return;
     }
   }
 
@@ -2797,7 +2814,11 @@ function updateChandelierCollapse(dt, time){
         o.userData._prevDt = dtSec;
       }
     }
-    shardMixer.update(dtSec);
+    // 减速窗口期：mixer 步进按 decayFactor 缩放（1.0 → 0），形成位移平滑减速
+    const mixerDt = (mdlG._collapseDecayFactor !== undefined)
+      ? dtSec * mdlG._collapseDecayFactor
+      : dtSec;
+    if(mixerDt > 0) shardMixer.update(mixerDt);
   }
 
   // 每帧确保地面 mesh 始终隐藏（防止动画轨道把 visibility 改回 true）
