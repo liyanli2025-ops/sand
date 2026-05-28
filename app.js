@@ -3896,34 +3896,73 @@ nextHint.addEventListener('click', chainToNextScene);
  *  陀螺仪
  * ================================================================ */
 function setupGyro(){
-  if(!('DeviceOrientationEvent' in window)) return;
-  if(typeof DeviceOrientationEvent.requestPermission === 'function'){
-    /* iOS：不弹自定义授权页，改为首次用户交互（点击/触摸）时静默请求权限。
-     * 用户已授权 → 启用陀螺仪；拒绝/失败 → 静默回退到纯拖动，不打扰用户。 */
-    const tryRequest = async () => {
+  if(!('DeviceOrientationEvent' in window)){
+    console.warn('[gyro] DeviceOrientationEvent 不存在，跳过陀螺仪');
+    return;
+  }
+  const needPermission = typeof DeviceOrientationEvent.requestPermission === 'function';
+  console.log('[gyro] setup: needPermission =', needPermission, ' isMobile =', isMobile);
+
+  // —— 监听器：优先 deviceorientationabsolute（Android Chrome 上 alpha 是绝对方位，更稳）
+  //         备用 deviceorientation（iOS、老 Android）
+  function attachListeners(){
+    let absoluteFired = false;
+    const onAbs = (e)=>{ absoluteFired = true; onDeviceOrientation(e); };
+    const onRel = (e)=>{
+      // 如果 absolute 已经在工作，relative 就忽略，避免双倍叠加
+      if(absoluteFired) return;
+      onDeviceOrientation(e);
+    };
+    window.addEventListener('deviceorientationabsolute', onAbs);
+    window.addEventListener('deviceorientation', onRel);
+    useGyro = true;
+    console.log('[gyro] listeners attached, useGyro = true');
+    // 5s 后检查是否真的有数据进来
+    setTimeout(()=>{
+      console.log('[gyro] 5s check: gyroYaw =', gyroYaw.toFixed(3),
+                  ' gyroYawOffset =', gyroYawOffset, ' useGyro =', useGyro);
+    }, 5000);
+  }
+
+  if(needPermission){
+    /* iOS：必须在用户手势栈里同步调用 requestPermission（不能 await 后再调）。
+     * 经验：把 requestPermission 直接写在 touchstart/click 处理函数里，
+     *      then 链里再 attachListeners，这样 iOS 才会真的弹权限框。 */
+    const tryRequest = () => {
       try{
-        const state = await DeviceOrientationEvent.requestPermission();
-        if(state === 'granted'){
-          window.addEventListener('deviceorientation', onDeviceOrientation);
-          useGyro = true;
-        }
-      }catch(e){ /* 静默忽略 */ }
+        DeviceOrientationEvent.requestPermission().then(state => {
+          console.log('[gyro] iOS permission state =', state);
+          if(state === 'granted'){
+            attachListeners();
+          }
+        }).catch(err => {
+          console.warn('[gyro] iOS permission rejected:', err && err.message);
+        });
+      }catch(e){
+        console.warn('[gyro] iOS requestPermission threw:', e && e.message);
+      }
       window.removeEventListener('touchstart', tryRequest);
       window.removeEventListener('click', tryRequest);
     };
     window.addEventListener('touchstart', tryRequest, { once: true, passive: true });
     window.addEventListener('click', tryRequest, { once: true });
-    /* 防御性：如果旧 DOM 仍然存在 gyroAsk 元素，强制隐藏 */
     if(typeof gyroAsk !== 'undefined' && gyroAsk) gyroAsk.style.display = 'none';
-  } else if(isMobile){
-    window.addEventListener('deviceorientation', onDeviceOrientation);
-    useGyro = true;
+  } else {
+    // Android / 桌面：直接绑定
+    attachListeners();
   }
 }
 function onDeviceOrientation(e){
-  if(e.alpha === null) return;
+  // alpha 可能为 null（某些 Android 浏览器或 iframe 嵌入场景），
+  // 此时降级用 gamma（左右旋转角，左右倾时变化）作为 yaw 来源
+  let alphaSource = e.alpha;
+  if(alphaSource === null || alphaSource === undefined){
+    // 降级：用 gamma 当 yaw（gamma 范围 -90~90，左右倾斜手机时变化）
+    if(e.gamma === null || e.gamma === undefined) return;
+    alphaSource = e.gamma * 2; // 放大灵敏度
+  }
   // —— Yaw（alpha）：左右转动 ——
-  const a = e.alpha;
+  const a = alphaSource;
   if(gyroYawOffset === null) gyroYawOffset = a;
   let yaw = (a - gyroYawOffset) * Math.PI / 180;
   while(yaw > Math.PI) yaw -= 2*Math.PI;
