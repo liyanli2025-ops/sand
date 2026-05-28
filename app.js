@@ -20,6 +20,30 @@ if(splashVideo){
 function dismissSplash(){
   if(splashDismissed) return;
   splashDismissed = true;
+
+  // ★★★ 在用户手势栈最顶层、同步调 iOS 陀螺仪权限请求 ★★★
+  //    这是 iOS Safari 唯一稳定接受的时机：用户点击的同一个 tick 内、未脱离手势栈、未 await
+  //    即使后续 splash 淡出/场景加载都在异步进行也不影响
+  if(typeof DeviceOrientationEvent !== 'undefined' &&
+     typeof DeviceOrientationEvent.requestPermission === 'function'){
+    try{
+      DeviceOrientationEvent.requestPermission().then(state => {
+        console.log('[gyro] iOS permission state =', state);
+        if(state === 'granted'){
+          window.__gyroPermissionGranted = true;
+          // 通知 setupGyro 已经授权，可以挂监听了
+          if(typeof window.__gyroAttachListeners === 'function'){
+            window.__gyroAttachListeners('splash-granted');
+          }
+        }
+      }).catch(err => {
+        console.warn('[gyro] iOS requestPermission rejected:', err && err.message);
+      });
+    }catch(e){
+      console.warn('[gyro] iOS requestPermission threw:', e && e.message);
+    }
+  }
+
   splashEl.classList.add('fade-out');
   document.body.classList.remove('splash-mode');
   // 不进地图，直接进场景 1
@@ -3964,16 +3988,27 @@ function setupGyro(){
       try{
         DeviceOrientationEvent.requestPermission().then(state => {
           console.log('[gyro] iOS permission state =', state);
-          if(state === 'granted') attachListeners('iOS-granted');
-          else console.warn('[gyro] iOS permission not granted:', state);
+          if(state === 'granted'){
+            window.__gyroPermissionGranted = true;
+            attachListeners('iOS-granted');
+          } else {
+            console.warn('[gyro] iOS permission not granted:', state);
+          }
         }).catch(err => {
-          console.warn('[gyro] iOS requestPermission rejected:', err && err.message);
-          // 拒绝后也尝试直接绑（某些 WebView 拒绝了仍然能收事件）
-          attachListeners('after-reject-fallback');
+          console.warn('[gyro] iOS requestPermission rejected:', err && err.message,
+            '— 可能此时不在用户手势栈里，将在下次手势重试');
+          // ❌ 不再无脑 fallback 挂监听：iOS 没授权就是收不到事件，挂了也白挂
+          // 重新挂手势钩子，等下次真用户点击再试
+          const retryGesture = () => {
+            tryAskPermissionThenAttach();
+            window.removeEventListener('touchstart', retryGesture);
+            window.removeEventListener('click', retryGesture);
+          };
+          window.addEventListener('touchstart', retryGesture, { once: true, passive: true });
+          window.addEventListener('click', retryGesture, { once: true });
         });
       }catch(e){
         console.warn('[gyro] iOS requestPermission threw:', e && e.message);
-        attachListeners('after-throw-fallback');
       }
     } else {
       attachListeners('no-permission-API');
@@ -3981,8 +4016,18 @@ function setupGyro(){
   }
 
   if(needPermission){
-    // iOS Safari：必须用户手势内调用（保留 then 链不能 await）
+    // iOS Safari：授权请求由 dismissSplash 负责（在用户点击 splash 进入按钮的手势栈里调用）
+    // 这里只暴露 attachListeners 给那边，让它在权限通过后回调挂事件
+    window.__gyroAttachListeners = attachListeners;
+    // 兜底：如果 dismissSplash 那条路径异常没跑（比如绕过了 splash），
+    // 在这里也挂一次手势钩子，再尝试请求权限
     const tryRequest = () => {
+      // 如果 dismissSplash 已经请求过且被 granted，attachListeners 已被调用，跳过
+      if(window.__gyroPermissionGranted){
+        window.removeEventListener('touchstart', tryRequest);
+        window.removeEventListener('click', tryRequest);
+        return;
+      }
       tryAskPermissionThenAttach();
       window.removeEventListener('touchstart', tryRequest);
       window.removeEventListener('click', tryRequest);
