@@ -3901,46 +3901,89 @@ function setupGyro(){
     return;
   }
   const needPermission = typeof DeviceOrientationEvent.requestPermission === 'function';
-  console.log('[gyro] setup: needPermission =', needPermission, ' isMobile =', isMobile);
+  // 详细环境探测，方便定位"有 DeviceOrientationEvent 但收不到事件"的真凶
+  const ua = navigator.userAgent;
+  const inWeChat   = /MicroMessenger/i.test(ua);
+  const inQQ       = /\bQQ\//i.test(ua) && !inWeChat;
+  const inWeibo    = /Weibo/i.test(ua);
+  const isStandaloneSafari = /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|MicroMessenger|QQ\/|Weibo|UCBrowser/i.test(ua);
+  console.log('[gyro] setup:',
+    'needPermission=', needPermission,
+    'isMobile=', isMobile,
+    'inWeChat=', inWeChat,
+    'inQQ=', inQQ,
+    'inWeibo=', inWeibo,
+    'isStandaloneSafari=', isStandaloneSafari,
+    'isSecure=', window.isSecureContext,
+    'protocol=', location.protocol);
+  console.log('[gyro] UA:', ua);
 
   // —— 监听器：优先 deviceorientationabsolute（Android Chrome 上 alpha 是绝对方位，更稳）
   //         备用 deviceorientation（iOS、老 Android）
-  function attachListeners(){
+  let _firstEventLogged = false;
+  function attachListeners(label){
     let absoluteFired = false;
-    const onAbs = (e)=>{ absoluteFired = true; onDeviceOrientation(e); };
+    const onAbs = (e)=>{
+      absoluteFired = true;
+      if(!_firstEventLogged){
+        _firstEventLogged = true;
+        console.log('[gyro] FIRST EVENT (absolute):',
+          'alpha=', e.alpha, 'beta=', e.beta, 'gamma=', e.gamma);
+      }
+      onDeviceOrientation(e);
+    };
     const onRel = (e)=>{
-      // 如果 absolute 已经在工作，relative 就忽略，避免双倍叠加
       if(absoluteFired) return;
+      if(!_firstEventLogged){
+        _firstEventLogged = true;
+        console.log('[gyro] FIRST EVENT (relative):',
+          'alpha=', e.alpha, 'beta=', e.beta, 'gamma=', e.gamma);
+      }
       onDeviceOrientation(e);
     };
     window.addEventListener('deviceorientationabsolute', onAbs);
     window.addEventListener('deviceorientation', onRel);
     useGyro = true;
-    console.log('[gyro] listeners attached, useGyro = true');
-    // 5s 后检查是否真的有数据进来
+    console.log('[gyro] listeners attached via', label, ', useGyro=true');
     setTimeout(()=>{
-      console.log('[gyro] 5s check: gyroYaw =', gyroYaw.toFixed(3),
-                  ' gyroYawOffset =', gyroYawOffset, ' useGyro =', useGyro);
+      console.log('[gyro] 5s check:',
+        'firstEvent=', _firstEventLogged,
+        'gyroYaw=', gyroYaw.toFixed(3),
+        'gyroYawOffset=', gyroYawOffset,
+        'useGyro=', useGyro);
+      if(!_firstEventLogged){
+        console.error('[gyro] ❌ 5 秒内没有收到任何 deviceorientation 事件 ——',
+          '通常是 ① iOS 未授权 ② WebView 屏蔽 sensor ③ 桌面/无传感器设备');
+      }
     }, 5000);
   }
 
-  if(needPermission){
-    /* iOS：必须在用户手势栈里同步调用 requestPermission（不能 await 后再调）。
-     * 经验：把 requestPermission 直接写在 touchstart/click 处理函数里，
-     *      then 链里再 attachListeners，这样 iOS 才会真的弹权限框。 */
-    const tryRequest = () => {
+  // 通用授权请求函数（有些 WebView 即使 needPermission=false 也能调用）
+  function tryAskPermissionThenAttach(){
+    if(typeof DeviceOrientationEvent.requestPermission === 'function'){
       try{
         DeviceOrientationEvent.requestPermission().then(state => {
           console.log('[gyro] iOS permission state =', state);
-          if(state === 'granted'){
-            attachListeners();
-          }
+          if(state === 'granted') attachListeners('iOS-granted');
+          else console.warn('[gyro] iOS permission not granted:', state);
         }).catch(err => {
-          console.warn('[gyro] iOS permission rejected:', err && err.message);
+          console.warn('[gyro] iOS requestPermission rejected:', err && err.message);
+          // 拒绝后也尝试直接绑（某些 WebView 拒绝了仍然能收事件）
+          attachListeners('after-reject-fallback');
         });
       }catch(e){
         console.warn('[gyro] iOS requestPermission threw:', e && e.message);
+        attachListeners('after-throw-fallback');
       }
+    } else {
+      attachListeners('no-permission-API');
+    }
+  }
+
+  if(needPermission){
+    // iOS Safari：必须用户手势内调用（保留 then 链不能 await）
+    const tryRequest = () => {
+      tryAskPermissionThenAttach();
       window.removeEventListener('touchstart', tryRequest);
       window.removeEventListener('click', tryRequest);
     };
@@ -3948,8 +3991,20 @@ function setupGyro(){
     window.addEventListener('click', tryRequest, { once: true });
     if(typeof gyroAsk !== 'undefined' && gyroAsk) gyroAsk.style.display = 'none';
   } else {
-    // Android / 桌面：直接绑定
-    attachListeners();
+    // 没有 requestPermission API 的环境（Android、桌面、某些 WebView）
+    // 先直接绑，同时也挂一个用户手势钩子尝试再次激活（针对 iOS WebView 异常情况）
+    attachListeners('direct-no-permission');
+    // 兜底：万一这个 WebView 之后才注入 requestPermission，第一次手势再试一次
+    const retryOnGesture = () => {
+      if(typeof DeviceOrientationEvent.requestPermission === 'function' && !_firstEventLogged){
+        console.log('[gyro] requestPermission 在用户手势后变得可用，重试');
+        tryAskPermissionThenAttach();
+      }
+      window.removeEventListener('touchstart', retryOnGesture);
+      window.removeEventListener('click', retryOnGesture);
+    };
+    window.addEventListener('touchstart', retryOnGesture, { once: true, passive: true });
+    window.addEventListener('click', retryOnGesture, { once: true });
   }
 }
 function onDeviceOrientation(e){
