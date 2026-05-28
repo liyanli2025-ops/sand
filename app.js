@@ -2017,7 +2017,7 @@ function buildScatteredPositions(){
  *  使用真实碎玻璃 3D 模型（broken_wine_glass.glb，257 块独立碎片 mesh）
  * ================================================================ */
 const SHARD_COUNT = isMobile ? 120 : 250;
-const DUST_COUNT  = isMobile ? 300 : 800;
+const DUST_COUNT  = isMobile ? 600 : 1500;
 
 // 碎片模型缓存
 let shardModelMeshes = null; // 加载后的碎片 mesh 数组
@@ -2290,20 +2290,44 @@ function createDustSystemWorld(samplePool, worldSize, modelCenter){
   dustData = [];
 
   const range = Math.max(worldSize.x, worldSize.y, worldSize.z);
+
+  // —— 以相机为中心做球壳均匀分布 ——
+  // 球壳半径：内半径 R_IN（相机近距离也有微尘）、外半径 R_OUT（包围整个观察范围）
+  // 这样无论相机朝哪个方向看，视野里始终有微尘飘动
+  const camPos = (typeof camera !== 'undefined' && camera) ? camera.position : new THREE.Vector3(0, 0, 0);
+  // 相机到模型中心距离 → 决定 dust 球半径（保证模型本身也被笼罩在内）
+  const camToCenter = modelCenter ? camPos.distanceTo(modelCenter) : 100;
+  const R_IN = Math.max(range * 0.30, 50);                                // 至少 50 单位远，避免糊在镜头上
+  const R_OUT = Math.max(camToCenter + range * 0.8, range * 1.8, 300);   // 远端：包围相机+模型整体
+  // 给每颗微尘预存它相对相机的"球壳位置"，更新时用绝对世界坐标
   for(let i = 0; i < count; i++){
-    const src = samplePool[Math.floor(Math.random() * samplePool.length)];
-    const px = src.pos.x + (Math.random()-0.5) * range * 0.3;
-    const py = src.pos.y + (Math.random()-0.5) * range * 0.3;
-    const pz = src.pos.z + (Math.random()-0.5) * range * 0.3;
+    // 球面方向：用 acos 反变换均匀采样（避免两极聚集）
+    const u = Math.random();
+    const v = Math.random();
+    const theta = 2 * Math.PI * u;             // 经度
+    const phi = Math.acos(2 * v - 1);          // 纬度（均匀）
+    const sinPhi = Math.sin(phi);
+    const dx = sinPhi * Math.cos(theta);
+    const dy = Math.cos(phi);
+    const dz = sinPhi * Math.sin(theta);
+    // 半径：在 [R_IN, R_OUT] 上用 r³ 反变换（让远端有更多颗，体积均匀）
+    const rRand = R_IN + (R_OUT - R_IN) * Math.cbrt(Math.random());
+    const px = camPos.x + dx * rRand;
+    const py = camPos.y + dy * rRand;
+    const pz = camPos.z + dz * rRand;
     posArr[i*3] = px; posArr[i*3+1] = py; posArr[i*3+2] = pz;
     dustData.push({
       x: px, y: py, z: pz,
+      // 微弱的随机漂浮速度（不再带"-range*0.002"的整体下沉，否则上半球会变空）
       vx: (Math.random()-0.5) * range * 0.01,
-      vy: (Math.random()-0.5) * range * 0.008 - range * 0.002,
+      vy: (Math.random()-0.5) * range * 0.006,
       vz: (Math.random()-0.5) * range * 0.01,
       twinkleSpeed: 2 + Math.random() * 5,
       twinklePhase: Math.random() * Math.PI * 2,
       delay: Math.random() * 0.3,
+      // 记录球壳半径范围，更新时用于回卷
+      _rIn: R_IN,
+      _rOut: R_OUT,
     });
   }
   geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
@@ -2830,7 +2854,7 @@ function updateChandelierCollapse(dt, time){
     else mdlG._blastLight.intensity = Math.max(0, 10 * Math.exp(-(elapsed - 0.3) * 0.6));
   }
 
-  // 微尘更新
+  // 微尘更新（球壳分布：以相机为中心包围观察者，飘出外壳就回卷到对侧球壳）
   if(dustPoints && dustData.length > 0){
     const dPos = dustPoints.geometry.getAttribute('position');
     // 0~0.5s 渐入到 0.7；0.5~5s 保持 0.7；5s 之后柔和回落到 0.38（不再消失）
@@ -2845,12 +2869,41 @@ function updateChandelierCollapse(dt, time){
       dustOpacity = 0.7 - t * (0.7 - 0.38);
     }
     dustPoints.material.opacity = dustOpacity;
+
+    const camX = camera.position.x;
+    const camY = camera.position.y;
+    const camZ = camera.position.z;
     for(let i = 0; i < dustData.length; i++){
       const d = dustData[i];
       if(elapsed < d.delay) continue;
       d.x += d.vx * dtSec; d.y += d.vy * dtSec; d.z += d.vz * dtSec;
       d.x += Math.sin(time * 0.001 * d.twinkleSpeed + d.twinklePhase) * 0.01;
       d.y += Math.cos(time * 0.001 * d.twinkleSpeed * 0.7 + d.twinklePhase) * 0.005;
+
+      // —— 回卷：超出外球壳的微尘从对侧（相对相机）以略大于内半径处重新出现 ——
+      // 保证视野任何方向都始终有微尘填充，不会"飘走变空"
+      const ox = d.x - camX, oy = d.y - camY, oz = d.z - camZ;
+      const r2 = ox*ox + oy*oy + oz*oz;
+      const rOut2 = d._rOut * d._rOut;
+      if(r2 > rOut2){
+        // 已飘出外壳：把它放到相对相机的随机方向、内半径附近的新位置
+        const u = Math.random(), v = Math.random();
+        const theta = 2 * Math.PI * u;
+        const phi = Math.acos(2 * v - 1);
+        const sinPhi = Math.sin(phi);
+        const nx = sinPhi * Math.cos(theta);
+        const ny = Math.cos(phi);
+        const nz = sinPhi * Math.sin(theta);
+        const newR = d._rIn * (1.0 + Math.random() * 0.3); // 内半径 + 0~30% 的随机
+        d.x = camX + nx * newR;
+        d.y = camY + ny * newR;
+        d.z = camZ + nz * newR;
+        // 重置随机速度（不重置 twinkle 以避免视觉同步）
+        d.vx = (Math.random()-0.5) * 0.5;
+        d.vy = (Math.random()-0.5) * 0.3;
+        d.vz = (Math.random()-0.5) * 0.5;
+      }
+
       dPos.setXYZ(i, d.x, d.y, d.z);
     }
     dPos.needsUpdate = true;
