@@ -4126,6 +4126,13 @@ let t0 = performance.now();
 const posAttr = geometry.getAttribute('position');
 
 function tick(){
+  // 性能优化：tab 不可见时彻底暂停渲染（节省 CPU/GPU/电池）
+  // 浏览器虽然会自动把后台 tab 的 RAF 降到 1Hz，但仍然会跑——
+  // 我们直接 return 阻断整个帧，等 visibilitychange 重新拉起。
+  if(document.hidden){
+    // 不再 requestAnimationFrame 自我递归，由 visibilitychange 监听器恢复
+    return;
+  }
   const now = performance.now();
   const dt = Math.min((now - t0)/16.67, 2.5);
   t0 = now;
@@ -4877,3 +4884,15 @@ function drawMiniSandbox(){
 }
 
 tick();
+
+// 性能优化：tab 隐藏时 tick 已自我停止；变可见时重新启动
+// （同时重置 t0 避免恢复后 dt 暴涨导致粒子瞬移/动画跳变）
+document.addEventListener('visibilitychange', () => {
+  if(!document.hidden){
+    t0 = performance.now();   // 重置时间锚，避免大 dt
+    tick();                   // 拉起主循环
+    console.log('[perf] tab 可见，恢复渲染');
+  } else {
+    console.log('[perf] tab 隐藏，暂停渲染');
+  }
+});
