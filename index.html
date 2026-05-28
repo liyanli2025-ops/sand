@@ -21,8 +21,7 @@
   <div class="splash-overlay"></div>
   <div class="splash-content">
     <div class="splash-tag">OPERATION · <b>IRAN</b> · 2026</div>
-    <div class="splash-title-zh">聚 不 起 的 沙</div>
-    <div class="splash-title-en">THE SAND THAT CANNOT BE GATHERED</div>
+    <img class="splash-logo" src="./assets/logo_v2.png" alt="聚不起的沙">
     <div class="splash-desc">
       100 天，伊朗在消失。<br>
       6 个瞬间，每一个都触手可及，每一个都留不住。
@@ -132,82 +131,12 @@
 
 <div class="next-hint" id="nextHint">continue <span class="arrow">→</span></div>
 
-<!-- iOS 陀螺仪授权 -->
-<div class="gyro-ask" id="gyroAsk">
-  <div class="text">
-    允许使用设备方向感应<br>
-    以便在场景中左右转动探索
-  </div>
-  <button id="gyroAllowBtn">ALLOW</button>
-  <button id="gyroDenyBtn" class="skip">SKIP</button>
-</div>
+<!-- iOS 陀螺仪授权页已移除：改为用户首次交互时静默请求 (app.js setupGyro) -->
 
 <!-- 模型加载状态指示（仅场景模式可见） -->
 <div class="model-loading" id="modelLoading">
   <span class="dot"></span><span class="dot"></span><span class="dot"></span>
   <div class="text">FORGING THE INSTRUMENT</div>
-</div>
-
-<!-- ===== Tabriz 场景：5 段视频 · 巴扎作坊（猫拆地毯）=====
-     V1 intro（工艺特写→拉远全景，一次性） →
-     V2 push-in（推近到猫，毛线球滚入，一次性）→
-     V3 paw（猫爪试探毛线球，循环 + 等用户点击）→
-     V4 chase（猫追线出画 + 织机被扯，一次性）→
-     V5 unravel（地毯解构，占位待生成；缺失时直接跳过到渐黑）
-     单一全屏容器，内部 5 个 <video>，由 JS 状态机控制可见性与播放
-     文案三段制 + 黑屏过渡 + 猫爪点击热区（在 V3 显示）
-     ============================================================ -->
-<div class="tabriz-scene-root" id="tabrizSceneRoot">
-  <div class="tabriz-vignette" id="tabrizVignette"></div>
-
-  <!-- 5 段视频：默认全部 hidden，状态机切换 active class
-       width/height 属性提前告知浏览器 intrinsic ratio，避免首帧出来时 reflow 导致"拉伸感" -->
-  <!-- 单 video 模式：只用 V1 这一个 <video> 元素播完整剧情，V2~V5 仅作 DOM 占位（不参与播放）
-       关键：不要写 width/height 属性 —— 微信安卓 WebView 的原生播放器会按 HTML width/height
-       初始化排版（720×1280 撑开屏幕），导致首帧出现"横向拉伸再收回"。
-       和开屏页 splash-video 一致：只靠 CSS 的 width:100% height:100% object-fit:cover 控制尺寸。 -->
-  <video class="tabriz-video tabriz-v1 active" id="tabrizV1"
-    muted playsinline webkit-playsinline preload="auto"></video>
-  <video class="tabriz-video tabriz-v2" id="tabrizV2"
-    muted playsinline webkit-playsinline preload="auto" style="display:none"></video>
-  <video class="tabriz-video tabriz-v3" id="tabrizV3"
-    muted playsinline webkit-playsinline preload="auto" style="display:none"></video>
-  <video class="tabriz-video tabriz-v4" id="tabrizV4"
-    muted playsinline webkit-playsinline preload="auto" style="display:none"></video>
-  <video class="tabriz-video tabriz-v5" id="tabrizV5"
-    muted playsinline webkit-playsinline preload="auto" style="display:none"></video>
-
-  <!-- 旧的 caption DOM 保留兼容（CSS display:none），叙事改走 .tabriz-subtitle -->
-  <div class="tabriz-caption" id="tabrizCap1"></div>
-  <div class="tabriz-caption" id="tabrizCap2"></div>
-
-  <!-- Tabriz 字幕：底部居中，纯文字（无暗框），一句一句出 -->
-  <div class="tabriz-subtitle" id="tabrizSubtitle">
-    <span class="tabriz-subtitle-line" data-key="s1">一块大不里士地毯，350 个结每平方英寸。</span>
-    <span class="tabriz-subtitle-line" data-key="s2">一个织工每天只能织一排，</span>
-    <span class="tabriz-subtitle-line" data-key="s3">一块 3 × 5 米的毯子，要织整整两年。</span>
-    <span class="tabriz-subtitle-line" data-key="s4">这一块，已经织了一年零四个月。</span>
-    <span class="tabriz-subtitle-line quiet" data-key="c1">2026 年 4 月 12 日。</span>
-    <span class="tabriz-subtitle-line" data-key="c2">导弹擦过 Tabriz 巴扎的屋顶。</span>
-    <span class="tabriz-subtitle-line" data-key="c3">一根丝线、一根丝线，倒着退了回去。</span>
-    <span class="tabriz-subtitle-line quiet" data-key="c4">他们说，毯子烧了可以再织一块。</span>
-    <span class="tabriz-subtitle-line" data-key="c5">但织进去的一年零四个月，回不来了。</span>
-  </div>
-
-  <!-- 猫爪点击热区（V3 循环期间显示，引导用户点击）
-       位置由 CSS 控制（屏幕右下 22% × 28% 区域，正好对应竖屏中猫爪所在） -->
-  <div class="tabriz-paw-hint" id="tabrizPawHint">
-    <span class="paw-ring"></span>
-    <span class="paw-label">tap the paw</span>
-  </div>
-
-  <!-- 入场黑屏：进入场景时盖住整个画面，V1 已经在播放但用户看不到，
-       playing 事件触发后再 fade-out，做出"黑场已经在动"的渐显效果。
-       z-index 只比 caption 高、比退场层 fadeout 低。 -->
-  <div class="tabriz-fadein show" id="tabrizFadein"></div>
-
-  <!-- 黑屏过渡层：V5（或 V4，若 V5 缺失）末帧 → 下一页 -->
-  <div class="tabriz-fadeout" id="tabrizFadeout"></div>
 </div>
 
 <script src="./three.min.js"></script>
@@ -224,5 +153,6 @@
 <script src="./UnrealBloomPass.js"></script>
 -->
 <script src="./app.js"></script>
+<script src="./directory.js"></script>
 </body>
 </html>

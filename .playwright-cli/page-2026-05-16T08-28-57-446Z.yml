@@ -1,0 +1,48 @@
+- generic [active] [ref=e1]:
+  - generic:
+    - generic:
+      - generic: OPERATION · IRAN · 2026
+      - generic: 聚 不 起 的 沙
+      - generic: THE SAND THAT CANNOT BE GATHERED
+      - generic:
+        - text: 100 天，伊朗在消失。
+        - text: 6 个瞬间，每一个都触手可及，每一个都留不住。
+      - generic [ref=e11] [cursor=pointer]: 触碰进入
+      - generic: 2026.03.20 — 06.28 · ایران
+  - generic:
+    - generic:
+      - text: FIELD · —
+      - text: —
+      - text: DAY 000 / 100
+    - generic:
+      - emphasis: —
+      - text: —
+      - text: —
+  - generic:
+    - img
+  - generic:
+    - generic:
+      - generic: 聚 不 起 的 沙
+      - generic: iran · 100 days of dust · field atlas
+    - generic: 探索下一个 · tehran
+    - generic: drag · look around | w a s d · move | scroll · forward
+  - generic:
+    - img
+  - generic:
+    - generic [ref=e15] [cursor=pointer]:
+      - text: TAP TO ARRIVE
+      - generic [ref=e17]: TEHRAN
+      - generic [ref=e18]: day 001
+    - generic [ref=e19]:
+      - generic [ref=e21]: TABRIZ
+      - generic [ref=e22]: day 023
+    - generic [ref=e23]:
+      - generic [ref=e25]: ISFAHAN
+      - generic [ref=e26]: day 047
+    - generic [ref=e27]:
+      - generic [ref=e29]: SHIRAZ
+      - generic [ref=e30]: day 068
+    - generic [ref=e31]:
+      - generic [ref=e33]: MASHHAD
+      - generic [ref=e34]: day 089
+  - generic: press & hold

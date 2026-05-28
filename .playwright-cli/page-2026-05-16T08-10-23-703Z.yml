@@ -1,0 +1,45 @@
+- generic [active] [ref=e1]:
+  - generic:
+    - generic:
+      - generic: OPERATION · IRAN · 2026
+      - generic: 聚 不 起 的 沙
+      - generic: THE SAND THAT CANNOT BE GATHERED
+      - generic:
+        - text: 100 天，伊朗在消失。
+        - text: 6 个瞬间，每一个都触手可及，每一个都留不住。
+      - generic [ref=e11] [cursor=pointer]: 触碰进入
+      - generic: 2026.03.20 — 06.28 · ایران
+  - generic:
+    - generic:
+      - text: FIELD · TABRIZ
+      - text: BAZAAR WORKSHOP
+      - text: DAY 023 / 100
+    - generic:
+      - emphasis: PERSIAN CARPET
+      - text: فرش ایرانی
+      - text: coord · 38.08°N
+  - generic:
+    - img
+  - generic:
+    - generic:
+      - generic: 聚 不 起 的 沙
+      - generic: iran · 100 days of dust · field atlas
+    - generic: 探索下一个 · tehran
+    - generic: drag · look around | w a s d · move | scroll · forward
+  - generic:
+    - img
+  - generic: TAP TO ARRIVE
+  - generic: tap to interrupt
+  - generic:
+    - generic:
+      - generic: 大不里士 · 巴扎作坊
+      - generic:
+        - text: TABRIZ · 38.08°N / 46.30°E
+        - emphasis: day 23
+      - paragraph: 2026 年 4 月 12 日。
+      - paragraph: 导弹擦过 Tabriz 巴扎的屋顶。
+      - paragraph: 一根丝线、一根丝线，倒着退了回去。
+      - paragraph: 他们说，毯子烧了可以再织一块。
+      - paragraph: 但织进去的一年零四个月，回不来了。
+      - generic:
+        - img

@@ -4,13 +4,29 @@ const fs = require('fs');
 
 const secrets = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../.codebuddy/secrets.json'), 'utf8'));
 const token = secrets.TUPLOAD_TOKEN;
-const tupload = path.resolve(__dirname, '../.codebuddy/skills/page-deploy/node_modules/.bin/tupload2.cmd');
+const tupload = path.resolve(__dirname, '../.codebuddy/skills/page-deploy/node_modules/.bin/tupload2');
 const baseUrl = '/qqcdn/redian/sand_test';
 
 const files = [
   'chandelier_compressed.glb',
   'broken_wine_glass_compressed.glb',
   'start.mp4',
+  'carpet.mp4',
+  // 旧的 4 段巴扎视频（保留兼容）
+  'videos/tarbizV1.mp4',
+  'videos/tarbizV2.mp4',
+  'videos/tarbizV3.mp4',
+  'videos/tarbizV4.mp4',
+  // 拼接视频（已废弃但保留兼容）
+  'videos/tabriz_full.mp4',
+  // 新架构：5 段独立视频（每段头尾各砍 0.1s 去 AI 静帧+假推镜）
+  'videos/tabrizV1_seg.mp4',
+  'videos/tabrizV2_seg.mp4',
+  'videos/tabrizV3_seg.mp4',
+  // V3 3× 加速版（换文件名是为了破 mat1.gtimg.com 边缘缓存，原 tabrizV3_seg.mp4 缓存被锁死）
+  'videos/tabrizV3_seg_3x.mp4',
+  'videos/tabrizV4_seg.mp4',
+  'videos/tabrizV5_seg.mp4',
   'draco/draco_decoder.js',
   'draco/draco_decoder.wasm',
   'draco/draco_wasm_wrapper.js',
