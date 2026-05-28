@@ -2,8 +2,6 @@
  *  《聚不起的沙》· 伊朗 100 天 · 沉浸式星图（AR-like）
  * ================================================================ */
 
-console.log('%c[app-v2.js] 已加载 新文件名版本', 'color:#d4a574;font-weight:bold;font-size:14px');
-
 /* ======== 开屏页逻辑 ======== */
 const splashEl = document.getElementById('splash');
 const splashVideo = document.getElementById('splashVideo');
@@ -100,17 +98,6 @@ const MODELS = {
     tiltZ: 12, tiltX: -15,
     yOffset: 50,
   },
-  // 场景 2 · 大不里士地毯作坊（纯视频驱动，无 3D 几何）
-  tabriz: {
-    url: null,                 // 标记为程序化场景，不需要加载 GLB
-    sampledPoints: null, loading: false, loadFailed: false,
-    targetHeight: 0,
-    tiltZ: 0, tiltX: 0,
-    yOffset: 0,
-    procedural: true,          // 程序化场景标记（兼容旧入口判断）
-    videoReady: false,         // 视频 DOM 是否已初始化
-    active: false,             // 是否当前正在演出（用于 cleanup 判断，等价旧的 sceneGroup 非空）
-  }
 };
 // 兼容旧变量名（大量旧代码引用）
 let kamanchehSampledPoints = null;
@@ -122,11 +109,6 @@ function loadModelForScene(sceneId){
   const mdl = MODELS[sceneId];
   if(!mdl) return;
   if(mdl.sampledPoints || mdl.loading || mdl.loadFailed) return;
-  // 程序化场景（如 tabriz 地毯作坊）不需要加载 GLB，标记 sampledPoints 为占位以阻止重复尝试
-  if(mdl.procedural){
-    mdl.sampledPoints = []; // 占位：表示"已就绪"，不会再走 loader
-    return;
-  }
   if(typeof THREE.GLTFLoader === 'undefined' || typeof THREE.MeshSurfaceSampler === 'undefined'){
     console.warn('[model] GLTFLoader 或 MeshSurfaceSampler 未加载');
     mdl.loadFailed = true;
@@ -402,7 +384,6 @@ function mergeMeshGeometries(meshes){
 
 // 启动模型预加载（首屏就开始下，进场景前大概率已就绪）
 loadModelForScene('golestan');
-loadModelForScene('tabriz');  // 程序化场景，loadModelForScene 内部跳过 GLB 加载
 
 /* ---------- 渲染器 ---------- */
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:false, alpha:true, powerPreference:'high-performance' });
@@ -464,6 +445,7 @@ function loadPanoForScene(sceneId, url){
     // 如果当前正在该场景，立即应用
     if(currentPanoId === sceneId && (mode === MODE.SCENE || mode === MODE.TRANSITION)){
       scene.background = tex;
+      _currentDisplayTex = tex;
       const sceneBgEl = document.querySelector('.scene-bg');
       if(sceneBgEl) sceneBgEl.style.display = 'none';
     }
@@ -587,14 +569,358 @@ panoBurnSphere.renderOrder = -9;  // 介于 dimSphere(-10) 与 sparkleGroup(-5) 
 panoBurnSphere.visible = false;
 scene.add(panoBurnSphere);
 
+/* ---------- 全景图溶解切换层（双贴图 + 火焰 mask） ----------
+ *  独立于爆炸用的 panoBurnSphere：这一层在两张全景图之间做 "火焰烧穿露出后景" 的电影效果
+ *  - BackSide 球壳，半径 1185（在 panoBurnSphere 1190 之内、sparkleGroup 之外）
+ *  - uTexFrom / uTexTo 同时采样，uProgress 0→1 沿 fbm 噪声前线推进
+ *  - 火焰前线宽度 ~0.18，前沿是亮焦褐色（不到纯黑），紧跟后面就露出新贴图
+ *  - 既能在两张全景之间溶解，也能透出"焦灼正在腐蚀"的视觉语言（呼应主题）
+ * ----------------------------------------------------------------- */
+const panoCrossfadeSphere = new THREE.Mesh(
+  new THREE.SphereGeometry(1185, 64, 32),
+  new THREE.ShaderMaterial({
+    uniforms: {
+      uTexFrom: { value: null },
+      uTexTo:   { value: null },
+      uProgress:{ value: 0.0 },   // 0=全部显示 from；1=全部显示 to
+      uTime:    { value: 0 },
+    },
+    vertexShader: `
+      varying vec3 vDir;
+      varying vec2 vUv;
+      void main(){
+        vDir = normalize(position);
+        // 球面 → equirect uv（和 EquirectangularReflectionMapping 一致）
+        vUv = vec2(
+          atan(vDir.z, vDir.x) / 6.2831853 + 0.5,
+          asin(clamp(vDir.y, -1.0, 1.0)) / 3.1415927 + 0.5
+        );
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uTexFrom;
+      uniform sampler2D uTexTo;
+      uniform float uProgress;
+      uniform float uTime;
+      varying vec3 vDir;
+      varying vec2 vUv;
+
+      float hash3(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+      float vnoise3(vec3 p){
+        vec3 i = floor(p), f = fract(p);
+        vec3 u = f * f * (3.0 - 2.0 * f);
+        float n000 = hash3(i + vec3(0,0,0));
+        float n100 = hash3(i + vec3(1,0,0));
+        float n010 = hash3(i + vec3(0,1,0));
+        float n110 = hash3(i + vec3(1,1,0));
+        float n001 = hash3(i + vec3(0,0,1));
+        float n101 = hash3(i + vec3(1,0,1));
+        float n011 = hash3(i + vec3(0,1,1));
+        float n111 = hash3(i + vec3(1,1,1));
+        return mix(
+          mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+          mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y),
+          u.z
+        );
+      }
+      float fbm3(vec3 p){
+        float v = 0.0, a = 0.5;
+        for(int i = 0; i < 5; i++){
+          v += a * vnoise3(p);
+          p *= 2.0; a *= 0.5;
+        }
+        return v;
+      }
+
+      void main(){
+        vec3 p = vDir * 2.4;
+        float n = fbm3(p + vec3(0.0, uTime * 0.03, uTime * 0.02));
+        n += 0.22 * fbm3(p * 4.5 - vec3(uTime * 0.05, 0.0, uTime * 0.04));
+        n = clamp(n, 0.0, 1.0);
+
+        // 顶部偏置：dot(vDir, up) ∈ [-1,1] → 归一化到 [0,1]
+        // n2 = n + topBias*0.2 后 clamp → 顶部像素 n2 偏大 → (1-n2) 偏小 → 阈值更低 → 更早烧
+        float topBias = clamp(dot(vDir, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5, 0.0, 1.0);
+        float n2 = clamp(n + topBias * 0.2, 0.0, 1.0);
+
+        // ★ 严格保证边界：
+        //   uProgress=0 → threshold=-0.2，对全屏像素都 < (1-n2 - 0.18) ∈ [-0.18, 0.82]，burnTo=0 ✓
+        //   uProgress=1 → threshold= 1.2，对全屏像素都 > (1-n2 + 0.06) ∈ [0.06, 1.06]，burnTo=1 ✓
+        float threshold = uProgress * 1.4 - 0.2;
+        float oneMinusN = 1.0 - n2;
+        float burnTo = smoothstep(oneMinusN - 0.18, oneMinusN + 0.06, threshold);
+
+        vec4 colFrom = texture2D(uTexFrom, vUv);
+        vec4 colTo   = texture2D(uTexTo,   vUv);
+
+        // 基础混合：burnTo 0→1 即 colFrom→colTo
+        vec3 base = mix(colFrom.rgb, colTo.rgb, burnTo);
+
+        // 火焰前线焦痕窄带
+        float edge = smoothstep(0.38, 0.48, burnTo) * (1.0 - smoothstep(0.52, 0.62, burnTo));
+        vec3 charredEdge = vec3(0.32, 0.16, 0.06);
+        base = mix(base, base * 0.55 + charredEdge, edge * 0.80);
+
+        // 极细高光火星
+        float spark = smoothstep(0.46, 0.50, burnTo) * (1.0 - smoothstep(0.50, 0.54, burnTo));
+        base += vec3(0.95, 0.45, 0.12) * spark * 0.85;
+
+        gl_FragColor = vec4(base, 1.0);
+      }
+    `,
+    transparent: false,
+    side: THREE.BackSide,
+    depthWrite: false,
+    depthTest: false,
+    fog: false,
+  })
+);
+panoCrossfadeSphere.renderOrder = -9.5;  // 比 panoBurnSphere 略前（更内），但仍在 sparkleGroup(-5) 之后
+panoCrossfadeSphere.visible = false;
+scene.add(panoCrossfadeSphere);
+
+/* ---------- 主场景全景图切换工具：用 panoBurnSphere 做"焦化→显形"过渡 ----------
+ *  transitionMainPanoTo(url, durationSec, onComplete)
+ *    - 把当前 scene.background 烧成焦黑 → 静默切贴图 → 烧回露出新贴图
+ *    - 总时长 ≈ durationSec * 2（一来一回各 durationSec）
+ *  transitionMainPanoBackToBlack(durationSec, onComplete)
+ *    - 单向：从当前透明态烧到全屏焦黑（用于"全部读完后再烧到黑")
+ *  transitionMainPanoFromBlack(url, durationSec, onComplete)
+ *    - 单向：从焦黑态加载贴图并烧出
+ *
+ *  关键：使用 window._panoTransitionActive 标志，让主循环跳过抢 uniform。
+ *  使用 panoBurnSphere.userData._dirOwn=true 临时托管，避免和爆炸烧灼冲突。
+ * ----------------------------------------------------------------- */
+function _ensurePanoLoaded(url, sceneId){
+  return new Promise((resolve, reject) => {
+    if(!url){ resolve(null); return; }
+    if(panoTextures[sceneId] && panoTextures[sceneId] !== 'loading'){
+      resolve(panoTextures[sceneId]); return;
+    }
+    const tex = new THREE.TextureLoader().load(url, (loaded) => {
+      loaded.mapping = THREE.EquirectangularReflectionMapping;
+      if(typeof THREE.SRGBColorSpace !== 'undefined') loaded.colorSpace = THREE.SRGBColorSpace;
+      else if(typeof THREE.sRGBEncoding !== 'undefined') loaded.encoding = THREE.sRGBEncoding;
+      panoTextures[sceneId] = loaded;
+      resolve(loaded);
+    }, undefined, (err) => { reject(err); });
+    panoTextures[sceneId] = 'loading';
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+  });
+}
+
+// 通用单向烧灼：从 fromProgress 缓动到 toProgress
+function _runBurnTween(fromProgress, toProgress, durationMs, onComplete){
+  window._panoTransitionActive = true;
+  panoBurnSphere.visible = true;
+  panoBurnSphere.material.uniforms.uProgress.value = fromProgress;
+  const startTime = performance.now();
+  const tick = () => {
+    const now = performance.now();
+    const t = Math.min(1, (now - startTime) / durationMs);
+    const eased = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2;
+    const cur = fromProgress + (toProgress - fromProgress) * eased;
+    panoBurnSphere.material.uniforms.uProgress.value = cur;
+    panoBurnSphere.material.uniforms.uTime.value = now * 0.001;
+    if(t < 1){
+      requestAnimationFrame(tick);
+    } else {
+      // 完全透明（toProgress 接近 -0.2）则隐藏球壳，给主场景让位
+      if(toProgress <= -0.15){
+        panoBurnSphere.visible = false;
+        panoBurnSphere.material.uniforms.uProgress.value = -0.2;
+      }
+      window._panoTransitionActive = false;
+      if(onComplete) onComplete();
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
+/**
+ * 把主场景的 scene.background 切到一张新全景图，过渡用 panoBurnSphere 烧灼。
+ * @param {string} url 新全景图 URL（等距柱状投影 jpg/png；尺寸建议 4096x2048 或 2048x1024）
+ * @param {string} cacheKey 用于 panoTextures 缓存的 key（如 'dir_setar'）
+ * @param {number} burnInSec 烧入时长（默认 1.6s）
+ * @param {number} burnOutSec 烧出时长（默认 1.8s）
+ * @param {function} onComplete 全部完成回调
+ */
+function transitionMainPanoTo(url, cacheKey, burnInSec, burnOutSec, onComplete){
+  burnInSec = burnInSec || 1.6;
+  burnOutSec = burnOutSec || 1.8;
+  // 烧灼方向：默认从穹顶向下
+  panoBurnSphere.material.uniforms.uBurnDir.value.set(0, 1, 0);
+  // 1) 当前态（透明 -0.2）→ 焦黑 1.10
+  _runBurnTween(-0.2, 1.10, burnInSec * 1000, () => {
+    // 2) 屏幕已焦黑：静默加载并切换贴图
+    _ensurePanoLoaded(url, cacheKey).then((tex) => {
+      if(tex){ scene.background = tex; _currentDisplayTex = tex; }
+      // 3) 焦黑 1.10 → 透明 -0.2，露出新背景
+      _runBurnTween(1.10, -0.2, burnOutSec * 1000, onComplete);
+    }).catch((err) => {
+      console.warn('[pano-transition] 加载失败:', url, err);
+      // 加载失败也要烧回，避免锁死焦黑
+      _runBurnTween(1.10, -0.2, burnOutSec * 1000, onComplete);
+    });
+  });
+}
+
+/**
+ * 全景图溶解切换：从当前 scene.background 直接火焰溶解到新贴图（不经过焦黑）
+ * - 用 panoCrossfadeSphere 同时采样两张贴图，沿 fbm 噪声前线扫描
+ * - 中途看不到纯黑，只有一条火焰前线扫过屏幕
+ * - 用于场景间穿梭（碎片标签互相点击切换）
+ *
+ * @param {string} url 新全景图 URL
+ * @param {string} cacheKey panoTextures 缓存 key
+ * @param {number} durationSec 总时长（默认 1.6s）
+ * @param {function} onComplete 完成回调
+ */
+/* ------------------------------------------------------------------
+ *  全景图切换 —— panoCrossfadeSphere 火焰前线直接 a→b 烧穿
+ *  ------------------------------------------------------------------
+ *  视觉：火焰前线扫过的地方，从 a 直接露出 b（不经过黑场，不经过焦化全屏）
+ *
+ *  ★ 多轮迭代后的根因总结 ★
+ *  之前所有失败修复的盲点是 fromTex 的来源：
+ *  - 一直用 _currentDisplayTex（上一次动画完成时的快照）作 fromTex
+ *  - 但用户在动画进行中再次触发切换时，他屏幕上看到的不是这张快照，
+ *    而是 shader 实时合成的中间帧 —— 用它当 fromTex 就出现"a→b→烧到a→a→b"
+ *
+ *  ★ 方案 B：球壳是唯一真相源 ★
+ *  - 新调用进来时，先把旧动画的目标贴图（uTexTo）强制落地到 scene.background
+ *    并隐藏球壳 —— 这样无论旧动画跑到哪一帧，"用户即将看到的画面"就是 scene.background
+ *  - 然后 fromTex = scene.background，球壳从完全干净的状态启动新动画
+ *  - 视觉代价：连点切换时旧动画会"瞬间快进到结束"，但绝不会出现错乱的烧灼方向
+ *
+ *  其它防御：
+ *  - callId 每帧检查 —— 旧 tick 检测到失效立即停止，不会写球壳 uniform
+ *  - 先加载完 toTex 再启动 tween —— 决不在动画跑到一半换 uTexTo
+ * ------------------------------------------------------------------ */
+function transitionMainPanoCrossfade(url, cacheKey, durationSec, onComplete, fovOptions){
+  durationSec = durationSec || 1.6;
+  const durMs = durationSec * 1000;
+
+  const mat = panoCrossfadeSphere.material;
+
+  /* FOV 同步渐变：消除"灼烧前后两次瞬时放大"的视觉突变。
+   * fovOptions = { fromFov: <number>, toFov: <number> } —— 都可选。
+   * 若只传 toFov，fromFov 取 camera.fov 当前值。
+   * 整个 FOV 插值与 progress 同步：与灼烧融为一体，看起来就是"画面一边灼烧一边慢慢拉广/收窄"，没有突变。 */
+  const fovOpt = fovOptions || null;
+  let fovFrom = null, fovTo = null;
+  if(fovOpt && typeof camera !== 'undefined' && camera){
+    fovFrom = (typeof fovOpt.fromFov === 'number') ? fovOpt.fromFov : camera.fov;
+    fovTo   = (typeof fovOpt.toFov   === 'number') ? fovOpt.toFov   : camera.fov;
+  }
+
+  /* ★ 关键一步：把旧动画的目标贴图立刻落地到 scene.background ★
+   * 无论旧动画跑到 progress=0.3 还是 0.9，新调用一进来就强制"快进到结束"：
+   * scene.background = 旧 uTexTo（即旧动画想去的地方），球壳隐藏。
+   * 这样 fromTex 永远 = 用户即将看到的画面（=scene.background），不会再错位。 */
+  if(panoCrossfadeSphere.visible){
+    const oldTo = mat.uniforms.uTexTo.value;
+    if(oldTo) scene.background = oldTo;
+    panoCrossfadeSphere.visible = false;
+  }
+
+  // 抢占 ID：旧 tick 在下一帧检测到 callId 失效会立即停止
+  const callId = (window._panoCallSeq = (window._panoCallSeq || 0) + 1);
+
+  // fromTex 就是 scene.background —— 唯一真相源
+  const fromTex = scene.background;
+
+  // 先加载完目标贴图，再启动动画
+  _ensurePanoLoaded(url, cacheKey).then((toTex) => {
+    if(callId !== window._panoCallSeq) return;
+
+    if(!toTex){
+      console.warn('[pano-crossfade] 加载失败:', url);
+      if(onComplete) onComplete();
+      return;
+    }
+
+    // 同一张贴图：无需烧灼，直接收工
+    if(fromTex === toTex){
+      scene.background = toTex;
+      if(onComplete) onComplete();
+      return;
+    }
+
+    // 设置双纹理 + 初始进度，启动球壳
+    mat.uniforms.uTexFrom.value = fromTex;
+    mat.uniforms.uTexTo.value   = toTex;
+    mat.uniforms.uProgress.value = 0.0;
+    panoCrossfadeSphere.visible = true;
+
+    // 启动前把 FOV 锁到 fovFrom（一般 = 当前 fov），后续随 eased 插值到 fovTo
+    if(fovFrom !== null && fovTo !== null && typeof camera !== 'undefined' && camera){
+      if(camera.fov !== fovFrom){
+        camera.fov = fovFrom;
+        camera.updateProjectionMatrix();
+      }
+    }
+
+    const startTime = performance.now();
+    const tick = () => {
+      // 被新调用接管：旧 tick 立即放弃（新调用已经把 oldTo 落地到 background）
+      if(callId !== window._panoCallSeq) return;
+
+      const now = performance.now();
+      const t = Math.min(1, (now - startTime) / durMs);
+      // ease-in-out cubic（火焰起势→匀速→收尾）
+      const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+      mat.uniforms.uProgress.value = eased;
+      mat.uniforms.uTime.value = now * 0.001;
+
+      // FOV 同步插值
+      if(fovFrom !== null && fovTo !== null && typeof camera !== 'undefined' && camera){
+        const newFov = fovFrom + (fovTo - fovFrom) * eased;
+        if(Math.abs(camera.fov - newFov) > 0.01){
+          camera.fov = newFov;
+          camera.updateProjectionMatrix();
+        }
+      }
+
+      if(t < 1){
+        requestAnimationFrame(tick);
+      } else {
+        if(callId !== window._panoCallSeq) return;
+        // 动画收尾：落地到 toTex，球壳退场
+        scene.background = toTex;
+        panoCrossfadeSphere.visible = false;
+        mat.uniforms.uProgress.value = 0.0;
+        // 收尾时强制把 fov 精确落到 fovTo（避免插值残差）
+        if(fovFrom !== null && fovTo !== null && typeof camera !== 'undefined' && camera){
+          if(camera.fov !== fovTo){
+            camera.fov = fovTo;
+            camera.updateProjectionMatrix();
+          }
+        }
+        if(onComplete) onComplete();
+      }
+    };
+    requestAnimationFrame(tick);
+  }).catch((err) => {
+    console.warn('[pano-crossfade] 加载失败:', url, err);
+    if(onComplete) onComplete();
+  });
+}
+
+// 保留此变量是为了不破坏其他代码（enterScene / exit 等会赋值），
+// 但 transitionMainPanoCrossfade 内部完全不读它 —— 真相源永远是 scene.background
+let _currentDisplayTex = null;
+
 /* ---------- 全景图水晶反光光点（随视角切换闪烁） ---------- */
 const sparkleGroup = new THREE.Group();
 sparkleGroup.visible = false;
 sparkleGroup.renderOrder = -5;
 scene.add(sparkleGroup);
 
-// —— A. 密集小光点（球面分布，约 260 颗）——
-const SPARKLE_COUNT = 260;
+// —— A. 密集小光点（球面分布，约 480 颗，让镜宫更富丽堂皇）——
+const SPARKLE_COUNT = 480;
 const SPARKLE_RADIUS = 900;
 const sparkleGeo = new THREE.BufferGeometry();
 const sparklePos = new Float32Array(SPARKLE_COUNT * 3);
@@ -620,11 +946,11 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
   sparkleDir[i*3+1] = -ny;
   sparkleDir[i*3+2] = -nz;
   sparkleSeed[i] = Math.random() * 100;
-  // 缩小：三档尺寸混合（之前 12~60，现在 6~24，且偏小）
+  // 富丽堂皇配比：大颗更多更大，整体加密加亮
   const r = Math.random();
-  if(r < 0.15)      sparkleSize[i] = 16 + Math.random() * 8;    // 大颗（15%）
-  else if(r < 0.55) sparkleSize[i] = 10 + Math.random() * 6;    // 中颗（40%）
-  else              sparkleSize[i] = 5 + Math.random() * 5;     // 小颗（45%）
+  if(r < 0.22)      sparkleSize[i] = 22 + Math.random() * 12;   // 大颗（22% / 22~34）
+  else if(r < 0.62) sparkleSize[i] = 13 + Math.random() * 8;    // 中颗（40% / 13~21）
+  else              sparkleSize[i] = 6 + Math.random() * 6;     // 小颗（38% / 6~12）
 }
 sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
 sparkleGeo.setAttribute('aDir',     new THREE.BufferAttribute(sparkleDir, 3));
@@ -719,8 +1045,8 @@ const sparklePoints = new THREE.Points(sparkleGeo, sparkleMat);
 sparklePoints.frustumCulled = false;
 sparkleGroup.add(sparklePoints);
 
-// —— B. 大颗星芒（Sprite，约 18 颗）——
-const flareCount = 18;
+// —— B. 大颗星芒（Sprite，约 32 颗，烫金大颗给镜宫加奢华感）——
+const flareCount = 32;
 const flareSprites = [];
 for(let i = 0; i < flareCount; i++){
   const u = Math.random(), v = 0.20 + Math.random() * 0.65;
@@ -739,8 +1065,8 @@ for(let i = 0; i < flareCount; i++){
   });
   const spr = new THREE.Sprite(sprMat);
   spr.position.set(x, y, z);
-  // 缩小：从 130~230 → 60~110（约 ½）
-  spr.scale.setScalar(60 + Math.random() * 50);
+  // 加大：80~150（之前 60~110）让大颗星芒更醒目
+  spr.scale.setScalar(80 + Math.random() * 70);
   spr.userData = {
     dir: new THREE.Vector3(-x, -y, -z).normalize(),
     seed: Math.random() * 100,
@@ -945,43 +1271,6 @@ const COORDINATES = [
       ]
     }
   },
-  {
-    id: 'tabriz', name: 'TABRIZ', zh:'大不里士 · 巴扎作坊',
-    lon: 46.30, lat: 38.08, day: 23,
-    modelId: 'tabriz',
-    panoUrl: null,  // 关闭天空盒：纪录片定镜，靠暗角+暖光晕营造氛围
-    subtitle: 'BAZAAR WORKSHOP',
-    subtitleRight: 'PERSIAN CARPET',
-    subtitleRight2: 'فرش ایرانی',
-    sceneReady: true,
-    story: {
-      coord: 'TABRIZ · 38.08°N / 46.30°E',
-      day: 'day 23',
-      lines: [
-        { text: '一块大不里士地毯，350 个结每平方英寸。', quiet:false },
-        { text: '一个织工每天只能织一排，', quiet:false },
-        { text: '一块 3 × 5 米的毯子，要织整整两年。', quiet:false },
-        { text: '这一块，已经织了一年零四个月。', quiet:false },
-      ]
-    },
-    collapseStory: {
-      coord: 'TABRIZ · 38.08°N / 46.30°E',
-      day: 'day 23',
-      lines: [
-        { text: '2026 年 4 月 12 日。', quiet:true },
-        { text: '导弹擦过 Tabriz 巴扎的屋顶。', quiet:false },
-        { text: '一根丝线、一根丝线，倒着退了回去。', quiet:false },
-        { text: '他们说，毯子烧了可以再织一块。', quiet:true },
-        { text: '但织进去的一年零四个月，回不来了。', quiet:false },
-      ]
-    }
-  },
-  { id:'isfahan', name:'ISFAHAN', zh:'伊斯法罕', lon:51.67, lat:32.65, day:47,
-    subtitle:'SHEIKH LOTFOLLAH', subtitleRight:'THE DOME', subtitleRight2:'گنبد', sceneReady:false },
-  { id:'shiraz', name:'SHIRAZ', zh:'设拉子', lon:52.58, lat:29.61, day:68,
-    subtitle:'NASIR AL-MULK', subtitleRight:'THE WINDOWS', subtitleRight2:'پنجره', sceneReady:false },
-  { id:'mashhad', name:'MASHHAD', zh:'马什哈德', lon:59.61, lat:36.30, day:89,
-    subtitle:'HAFT-SIN · NEW YEAR', subtitleRight:'THE TABLE', subtitleRight2:'سفره', sceneReady:false },
 ];
 COORDINATES.forEach(c=>{
   const p = geoToXZ(c.lon, c.lat);
@@ -2010,6 +2299,14 @@ function triggerChandelierCollapse(){
   const mdlG = MODELS.golestan;
   if(mdlG.collapseState !== 'idle') return;
   if(!shardModelMeshes || !shardModelMeshes.scene){ console.warn('[shard] 碎片模型未加载'); return; }
+
+  // —— 目录模式参数 ——
+  // 碎片动画播到 _collapsePauseT 秒时定格（碎片刚爆开还未落地，悬停在空中），
+  // 转入"目录态"：5 块大碎片亮起、可点击。用户读完所有 5 个故事后自动 resume。
+  mdlG._collapsePauseT = 0.9;            // 动画时间轴上的暂停时刻（秒）
+  mdlG._collapsePaused = false;
+  mdlG._collapseDirectoryReady = false;
+  mdlG._pauseSpinDiagPrinted = false;     // 重置诊断打印标志
   // 崩塌起爆时重新启用自动旋转：用户操作过的 yaw 累积值清零，旋转从当前视角"接续"开始
   // —— 让画面在碎片飞散时再次缓慢转起来，呼应进场时的"空间感"
   // 启动加速过冲：1.2s 内从 PEAK(0.6) 缓动到 SETTLE(0.18)，呼应爆炸冲击波
@@ -2126,6 +2423,26 @@ function triggerChandelierCollapse(){
   shardMixer = new THREE.AnimationMixer(shardScene);
   if(shardModelMeshes.animations && shardModelMeshes.animations.length > 0){
     const clip = shardModelMeshes.animations[0];
+
+    // ★ 关键：mixer 驱动的是 GLTF 节点（Cube_cell_xxx 这种 Object3D），不是 mesh 自身
+    //   所以暂停态做角速度反推时，必须遍历这些被驱动的节点，而不是 isMesh 的子节点
+    //   这里一次性扫描 tracks，把所有有 quaternion 通道的 target 节点收集起来
+    const _spinTargets = [];
+    const _seen = new Set();
+    clip.tracks.forEach(t => {
+      const dotIdx = t.name.lastIndexOf('.');
+      if(dotIdx < 0) return;
+      const prop = t.name.substring(dotIdx + 1);
+      if(prop !== 'quaternion') return;
+      const targetName = t.name.substring(0, dotIdx);
+      if(_seen.has(targetName)) return;
+      _seen.add(targetName);
+      const node = shardScene.getObjectByName(targetName);
+      if(node) _spinTargets.push(node);
+    });
+    mdlG._spinTargets = _spinTargets;
+    console.log('[shard-clip] 收集到', _spinTargets.length, '个被 quaternion 驱动的节点（用于暂停态自转）');
+
     const action = shardMixer.clipAction(clip);
     action.setLoop(THREE.LoopOnce);
     action.clampWhenFinished = true;
@@ -2186,11 +2503,11 @@ function triggerChandelierCollapse(){
 
   if(COORDINATES[currentSceneIdx]?.sceneReady) storyEl.classList.add('show');
 
-  // —— 启动全景烧灼层（7s 缓慢焦化，最终全黑） ——
-  panoBurnSphere.visible = true;
-  panoBurnSphere.material.uniforms.uProgress.value = 0.05;  // 起点抬高，让一开始就有零星焦斑
-  mdlG._burnStartTime = performance.now();
-  mdlG._burnTotal = 7.0;            // 总时长 7s
+  // —— 注意：碎片爆炸时镜宫保持完整，不启动烧灼层。
+  //    只有在用户读完 5 个碎片、resumeCollapseFromDirectory 进入终幕阶段时，
+  //    才让 panoBurnSphere 接管把镜宫烧成全黑（变成结语星空底）。
+  mdlG._burnStartTime = null;
+  mdlG._burnTotal = 11.0;            // 总时长 11s（resume 时启用，更慢更绵长）
   mdlG._collapseLinesShown = 0;     // 已展示的崩坏文案行数
   mdlG._collapseStoryActive = false;
 
@@ -2211,8 +2528,15 @@ function triggerChandelierCollapse(){
   }
 
   // 动画播完后清理（给足时间）
+  // 注意：当目录暂停存在时，这两个 timeout 在 pauseCollapseForDirectory 里被清掉，
+  //       由 resumeCollapseFromDirectory 重新基于剩余时间安排。
   const clipDuration = shardModelMeshes.animations[0]?.duration || 5;
+  mdlG._collapseTotalSec = (clipDuration + 2);          // 总清理时长（用于 resume 时计算剩余）
+  mdlG._burnTotal = 11.0;                                  // 烧灼总时长（同步前面赋值）
+  mdlG._nextHintDelaySec = (mdlG._burnTotal + 0.5);       // nextHint 出现的相对时间
   mdlG._collapseTimeout = setTimeout(()=>{
+    // 目录暂停期间不结束（resume 后会重新安排）
+    if(mdlG._collapsePaused){ mdlG._collapseTimeout = null; return; }
     if(mdlG.collapseState==='collapsing'){
       mdlG.collapseState='done'; crystalCollapseActive=false;
       if(shardGroup.parent){ shardGroup.remove(shardScene); shardGroup.parent.remove(shardGroup); }
@@ -2232,6 +2556,7 @@ function triggerChandelierCollapse(){
 
   // 烧灼结束后（总时长 + 0.5s 缓冲）显示 nextHint，等待用户点击进下一场景
   mdlG._nextHintTimeout = setTimeout(()=>{
+    if(mdlG._collapsePaused){ mdlG._nextHintTimeout = null; return; }
     if(mdlG.collapseState === 'collapsing' || mdlG.collapseState === 'done'){
       nextHint.classList.add('show');
     }
@@ -2243,11 +2568,121 @@ function triggerChandelierCollapse(){
 /* 每帧更新：播放碎片原始动画 + 给停在地面的碎片加重力 + 微尘 */
 let shardExtraFall = {}; // 碎片额外下落速度 { meshId: velocity }
 
+// 暂停态自转复用对象（避免每帧 new 产生 GC）
+const pauseSpinShared = {
+  qDelta: new THREE.Quaternion(),
+  qPrevInv: new THREE.Quaternion(),
+  qStep: new THREE.Quaternion(),
+  vAxis: new THREE.Vector3()
+};
+
 function updateChandelierCollapse(dt, time){
   const mdlG = MODELS.golestan;
   if(mdlG.collapseState !== 'collapsing') return;
   const dtSec = dt / 60;
+
+  // ========== 目录暂停机制 ==========
+  // 当 mdlG._collapsePaused === true 时，整个崩塌的"主观时间"冻结：
+  // - shardMixer 不再 update（碎片悬停在空中）
+  // - 烧灼层 / story 节拍 / 重力补偿 / 整体淡出 全部不再推进
+  // 实现方式：每帧把 collapseStartTime / _burnStartTime / _collapseStorySwitchTime
+  // 都"往后推" dt 秒，让所有基于 (now - startTime) 的计算保持原值。
+  if(mdlG._collapsePaused){
+    const dtMs = dt * 16.67;
+    collapseStartTime += dtMs;
+    if(mdlG._burnStartTime) mdlG._burnStartTime += dtMs;
+    if(mdlG._collapseStorySwitchTime) mdlG._collapseStorySwitchTime += dtMs;
+    // 暂停期间唯一要做的事：让大碎片标签跟随屏幕位置 + 呼吸高亮
+    if(typeof updateDirectoryFragments === 'function') updateDirectoryFragments(time);
+
+    // ★ 暂停态：每个被驱动的节点维持"爆炸最后一帧"的真实角速度，5 秒内逐渐减速到 0
+    // 数据来源：mixer.update 之前每帧已经把节点 quaternion 拍到了 userData._prevQuat
+    //           暂停首帧进入此分支时：_prevQuat = 暂停前一帧的姿态，
+    //                                 o.quaternion = mixer 最后一次 update 后的姿态
+    //           两者差分 → 真实角速度（轴 + omega0 rad/s）
+    // 减速曲线：factor = 1 - (t/T)²   ease-out（先快后慢），T=5s 时 factor=0 完全停下
+    const spinTargets = mdlG._spinTargets;
+    if(spinTargets && spinTargets.length){
+      const _qDelta = pauseSpinShared.qDelta;
+      const _qPrevInv = pauseSpinShared.qPrevInv;
+      const _qStep = pauseSpinShared.qStep;
+      const _vAxis = pauseSpinShared.vAxis;
+      const SPIN_DECAY_SEC = 5.0; // 减速到完全停下的总时长
+
+      // 暂停态自身的"经过秒数"——首帧初始化为 0，之后每帧 +dtSec
+      if(mdlG._pauseSpinElapsed === undefined) mdlG._pauseSpinElapsed = 0;
+      const tNorm = Math.min(mdlG._pauseSpinElapsed / SPIN_DECAY_SEC, 1.0);
+      const factor = (1 - tNorm) * (1 - tNorm); // ease-out 平方衰减
+      mdlG._pauseSpinElapsed += dtSec;
+
+      for(let i = 0; i < spinTargets.length; i++){
+        const o = spinTargets[i];
+        const ud = o.userData;
+
+        if(!ud._spinAxis){
+          // 暂停首帧：从 _prevQuat → 当前 quaternion 反推初始角速度
+          if(!ud._prevQuat){
+            ud._spinAxis = new THREE.Vector3(
+              Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
+            ).normalize();
+            ud._spinOmega0 = 0.4;
+            continue;
+          }
+          _qPrevInv.copy(ud._prevQuat).invert();
+          _qDelta.copy(o.quaternion).multiply(_qPrevInv);
+          const w = Math.max(-1, Math.min(1, _qDelta.w));
+          const angle = 2 * Math.acos(w);
+          const s = Math.sqrt(1 - w * w);
+          const lastDt = ud._prevDt || dtSec;
+          if(s > 1e-4 && angle > 1e-4){
+            _vAxis.set(_qDelta.x / s, _qDelta.y / s, _qDelta.z / s).normalize();
+            const omega = Math.min(angle / lastDt, 6.0);
+            ud._spinAxis = _vAxis.clone();
+            ud._spinOmega0 = omega; // 保存初始角速度，每帧都按 factor 缩放使用
+          } else {
+            ud._spinAxis = new THREE.Vector3(
+              Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
+            ).normalize();
+            ud._spinOmega0 = 0.4;
+          }
+          continue;
+        }
+
+        // 之后每帧：当前角速度 = 初始角速度 × ease-out factor
+        if(factor > 0){
+          const curOmega = ud._spinOmega0 * factor;
+          if(curOmega > 0.001){
+            _qStep.setFromAxisAngle(ud._spinAxis, curOmega * dtSec);
+            o.quaternion.multiply(_qStep);
+          }
+        }
+      }
+    }
+    return;
+  }
+
   const elapsed = (performance.now() - collapseStartTime) / 1000;
+
+  // ========== 目录定格检测 ==========
+  // 当 mixer 时间达到 mdlG._collapsePauseT 时，进入暂停态、激活目录
+  if(!mdlG._collapseDirectoryReady && mdlG._collapsePauseT && shardMixer){
+    if(shardMixer.time >= mdlG._collapsePauseT){
+      if(typeof pauseCollapseForDirectory !== 'function'){
+        console.error('[app] pauseCollapseForDirectory 未定义，directory.js 可能加载失败');
+        mdlG._collapseDirectoryReady = true;
+        mdlG._collapsePauseT = null;
+        return;
+      }
+      try { pauseCollapseForDirectory(); }
+      catch(e){
+        console.error('[app] pauseCollapseForDirectory 抛错:', e && e.message);
+        mdlG._collapseDirectoryReady = true;
+        mdlG._collapsePauseT = null;
+      }
+      return;
+    }
+  }
+
 
   // ========== 衔接过渡：吊灯淡出 + 碎片淡入 ==========
   // 0 ~ 0.22s：吊灯保持完整（被点中的"停顿"，留更多实体停留时间）
@@ -2292,6 +2727,17 @@ function updateChandelierCollapse(dt, time){
 
   // 驱动碎片动画（在淡出中段附近起播，碎片有"先粘在原位再爆开"的感觉）
   if(shardMixer && elapsed >= 0.34){
+    // ★ 每帧 mixer.update 之前，把被 quaternion 驱动的节点的当前姿态拍到 _prevQuat
+    //   这样下一帧切到暂停态时，可以立刻反推真实角速度
+    const spinTargets = mdlG._spinTargets;
+    if(spinTargets && spinTargets.length){
+      for(let i = 0; i < spinTargets.length; i++){
+        const o = spinTargets[i];
+        if(!o.userData._prevQuat) o.userData._prevQuat = o.quaternion.clone();
+        else o.userData._prevQuat.copy(o.quaternion);
+        o.userData._prevDt = dtSec;
+      }
+    }
     shardMixer.update(dtSec);
   }
 
@@ -2356,7 +2802,17 @@ function updateChandelierCollapse(dt, time){
   // 微尘更新
   if(dustPoints && dustData.length > 0){
     const dPos = dustPoints.geometry.getAttribute('position');
-    const dustOpacity = elapsed < 0.5 ? elapsed / 0.5 * 0.7 : (elapsed < 5 ? 0.7 : 0.7 * Math.max(0, 1 - (elapsed - 5) / 3));
+    // 0~0.5s 渐入到 0.7；0.5~5s 保持 0.7；5s 之后柔和回落到 0.38（不再消失）
+    // —— 让灼烧到全黑后仍有"风中余烬"的微尘悬浮
+    let dustOpacity;
+    if(elapsed < 0.5){
+      dustOpacity = elapsed / 0.5 * 0.7;
+    } else if(elapsed < 5){
+      dustOpacity = 0.7;
+    } else {
+      const t = Math.min(1, (elapsed - 5) / 3);
+      dustOpacity = 0.7 - t * (0.7 - 0.38);
+    }
     dustPoints.material.opacity = dustOpacity;
     for(let i = 0; i < dustData.length; i++){
       const d = dustData[i];
@@ -2370,7 +2826,9 @@ function updateChandelierCollapse(dt, time){
   }
 
   // ========== 全景烧灼层推进 + sparkle 淡出 + 崩坏文案逐行展示 ==========
-  if(panoBurnSphere.visible && mdlG._burnStartTime){
+  // 注意：目录态切换全景图时（_panoTransitionActive=true），由 transitionMainPanoTo 自己控制 uProgress/uTime，
+  //       这里跳过，避免主循环把 uniform 抢回去
+  if(panoBurnSphere.visible && mdlG._burnStartTime && !window._panoTransitionActive){
     const T = mdlG._burnTotal || 7.0;
     const burnElapsed = (performance.now() - mdlG._burnStartTime) / 1000;
     const raw = Math.min(1, burnElapsed / T);
@@ -2475,6 +2933,13 @@ function cleanupChandelierScene(){
   mdlG.collapseState = 'idle';
   if(mdlG.shardData) mdlG.shardData.active = false;
   crystalCollapseActive = false;
+
+  // —— 目录态清理 ——
+  if(typeof teardownDirectoryFragments === 'function') teardownDirectoryFragments();
+  mdlG._collapsePaused = false;
+  mdlG._collapseDirectoryReady = false;
+  mdlG._collapsePauseT = null;
+  mdlG._directoryDoneCount = 0;
   if(mdlG._collapseTimeout) clearTimeout(mdlG._collapseTimeout);
   if(mdlG._nextHintTimeout) clearTimeout(mdlG._nextHintTimeout);
   mdlG._collapseTimeout = null;
@@ -2514,476 +2979,6 @@ function cleanupChandelierScene(){
   scene.fog = new THREE.FogExp2(0x05070d, 0.0035);
   console.log('[golestan] 场景清理完成');
 }
-
-
-/* ================================================================
- *  场景 2 · 大不里士地毯作坊（4 段视频驱动 · 猫拆地毯）
- *  叙事：用户进入大不里士巴扎织毯作坊，看到一只白色波斯猫
- *       盯着地上的红色毛线球。点击猫爪，猫一脚踢飞毛线球，
- *       毛线被扯出织机，整张地毯散开消失，画面渐黑。
- *  技术：零 3D——4 段竖屏 9:16 视频组成完整剧情：
- *       V1 推进：特写梭子织地毯 → 拉远到全景（一次性 ~6s）
- *       V2 待机：猫爪对毛线球跃跃欲试（loop，首尾帧一致）
- *       V3 触发：猫踢飞毛线球，毛线被拉扯（一次性 ~5s）
- *       V4 崩坏：地毯散开 → 织机倾倒 → 渐黑（一次性 ~7s）
- *  交互：V2 期间右下角猫爪热区可点击；30 秒无操作自动触发 V3。
- * ================================================================ */
-
-// 视频资源 URL：5 段独立 video 模式
-// 每段一个 mp4，单独编码（720×1280, h264, 24fps），头尾各砍 0.1s 去除 AI 生成的静帧+假推镜
-// V3 用 video.loop=true 循环（猫看毛线球），等用户点击猫爪或超时进 V4
-// 部署时 mp4 不打包入 H5，必须走 CDN
-// 视频版本号：内容更新时递增，强制浏览器/CDN 重新请求
-const _TABRIZ_V = '?v=10';
-const TABRIZ_VIDEO_URLS = {
-  v1: (_isLocal ? './videos/tabrizV1_seg.mp4' : _CDN + 'videos/tabrizV1_seg.mp4') + _TABRIZ_V,
-  v2: (_isLocal ? './videos/tabrizV2_seg.mp4' : _CDN + 'videos/tabrizV2_seg.mp4') + _TABRIZ_V,
-  // V3 单独换文件名是为了绕过 mat1.gtimg.com 的 CDN 边缘缓存
-  // —— 之前 1.5×/2×/3× 三次源站上传都被 CDN Cache Hit 拦截，URL 不变就不重新拉源
-  v3: (_isLocal ? './videos/tabrizV3_seg_3x.mp4' : _CDN + 'videos/tabrizV3_seg_3x.mp4') + _TABRIZ_V,
-  v4: (_isLocal ? './videos/tabrizV4_seg.mp4' : _CDN + 'videos/tabrizV4_seg.mp4') + _TABRIZ_V,
-  v5: (_isLocal ? './videos/tabrizV5_seg.mp4' : _CDN + 'videos/tabrizV5_seg.mp4') + _TABRIZ_V,
-};
-// V3 无操作多久自动触发 V4（毫秒）
-const TABRIZ_V3_AUTO_TIMEOUT = 30000;
-// 视频段状态枚举
-const TABRIZ_VIDEO_STATE = {
-  IDLE: 'idle',
-  V1: 'v1',
-  V2: 'v2',
-  V3: 'v3',
-  V4: 'v4',
-  V5: 'v5',
-  DONE: 'done',
-};
-
-// DOM 引用
-let _tabrizRoot = null;
-let _tabrizV1 = null, _tabrizV2 = null, _tabrizV3 = null, _tabrizV4 = null, _tabrizV5 = null;
-let _tabrizCap1 = null, _tabrizCap2 = null;
-let _tabrizSubtitle = null;             // 字幕容器
-let _tabrizSubLines = {};               // { key: <span> }
-let _tabrizPawHint = null;
-let _tabrizFadeout = null;
-let _tabrizFadein = null;        // 入场黑场遮罩（V1 在它后面已经开始播）
-let _tabrizFadeinStarted = false; // 是否已开始 fade-out（避免 playing 重复触发）
-
-// 状态
-let _tabrizCurState = TABRIZ_VIDEO_STATE.IDLE;
-let _tabrizV3Timer = null;
-let _tabrizCaptionTimers = [];
-let _tabrizActiveVideo = null;  // 当前正在播放的 video 元素引用
-
-/* 入口：进入 Tabriz 场景。函数名保留以兼容外部调用 */
-function enterCarpetScene(){
-  const mdlT = MODELS.tabriz;
-  _initTabrizVideoDom();
-  if(!_tabrizRoot){
-    console.warn('[tabriz] DOM 初始化失败');
-    return false;
-  }
-  // 隐藏 3D 粒子系统（Tabriz 期间用纯 DOM 视频）
-  scene.fog = null;
-  points.visible = false;
-  ambient.visible = false;
-  for(let i = 0; i < COUNT; i++){
-    positions[i*3] = 0; positions[i*3+1] = -9999; positions[i*3+2] = 0;
-  }
-  posAttr.needsUpdate = true;
-
-  mdlT.active = true;
-  // 进入根容器
-  _tabrizRoot.classList.remove('fade-out');
-  _tabrizRoot.classList.add('show');
-  _tabrizFadeout.classList.remove('show');
-  // Tabriz 不使用全局 story-card（改用专用底部字幕条）：主动隐藏 storyEl
-  if(typeof storyEl !== 'undefined' && storyEl){
-    storyEl.classList.remove('show');
-    storyEl.classList.remove('collapse-story');
-  }
-  // 入场黑场：确保黑屏遮罩处于 show 状态，V1 在它后面开始播
-  _tabrizFadeinStarted = false;
-  if(_tabrizFadein) _tabrizFadein.classList.add('show');
-
-  // 启动 V1 段
-  _tabrizPlayV1();
-  console.log('[tabriz] 视频场景启动');
-  return true;
-}
-
-/* 退出：清理 DOM + 视频，函数名保留以兼容外部调用 */
-function cleanupCarpetScene(){
-  const mdlT = MODELS.tabriz;
-  if(!mdlT.active) return;
-  mdlT.active = false;
-  _tabrizClearTimers();
-  _tabrizClearCaptionTimers();
-  // 暂停所有 video
-  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
-    if(!v) return;
-    try { v.pause(); v.loop = false; } catch(_e){}
-  });
-  _tabrizActiveVideo = null;
-  // 隐藏 UI
-  if(_tabrizPawHint) _tabrizPawHint.classList.remove('show');
-  if(_tabrizCap1) _tabrizCap1.classList.remove('show');
-  if(_tabrizCap2) _tabrizCap2.classList.remove('show');
-  // 清掉所有字幕行的 .show
-  if(_tabrizSubLines){
-    Object.values(_tabrizSubLines).forEach(el => el && el.classList.remove('show'));
-  }
-  if(_tabrizFadeout) _tabrizFadeout.classList.remove('show');
-  if(_tabrizFadein) _tabrizFadein.classList.remove('show');
-  _tabrizFadeinStarted = false;
-  // 清掉 V5 模糊（防止下次进场残留）
-  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
-    if(v) v.classList.remove('v5-blur');
-  });
-  // 隐藏根容器
-  if(_tabrizRoot){
-    _tabrizRoot.classList.remove('show', 'fade-out');
-  }
-  _tabrizCurState = TABRIZ_VIDEO_STATE.IDLE;
-  // 恢复粒子系统
-  points.visible = true;
-  ambient.visible = true;
-  scene.fog = new THREE.FogExp2(0x05070d, 0.0035);
-  console.log('[tabriz] 视频场景清理完成');
-}
-
-/* DOM 初始化（仅一次）
- * 【5 段独立 video 模式】每段视频一个 <video> 元素，分别加载各自的 src：
- *   - V1: tabrizV1_seg.mp4（intro 工艺特写→拉远）
- *   - V2: tabrizV2_seg.mp4（push-in 推近到猫）
- *   - V3: tabrizV3_seg.mp4（paw 猫看毛线球，loop=true 循环）
- *   - V4: tabrizV4_seg.mp4（chase 猫追线 + 织机被扯）
- *   - V5: tabrizV5_seg.mp4（unravel 地毯解构收尾）
- *   段切换时：暂停旧 video + display:none，新 video display:'' + play()
- *   头尾各砍 0.1s 已在素材层面处理（_hc_*.mp4），消除 AI 生成的静帧+假推镜 */
-function _initTabrizVideoDom(){
-  if(_tabrizRoot) return;
-  _tabrizRoot     = document.getElementById('tabrizSceneRoot');
-  _tabrizV1       = document.getElementById('tabrizV1');
-  _tabrizV2       = document.getElementById('tabrizV2');
-  _tabrizV3       = document.getElementById('tabrizV3');
-  _tabrizV4       = document.getElementById('tabrizV4');
-  _tabrizV5       = document.getElementById('tabrizV5');
-  _tabrizCap1     = document.getElementById('tabrizCap1');
-  _tabrizCap2     = document.getElementById('tabrizCap2');
-  _tabrizSubtitle = document.getElementById('tabrizSubtitle');
-  if(_tabrizSubtitle){
-    _tabrizSubLines = {};
-    _tabrizSubtitle.querySelectorAll('.tabriz-subtitle-line').forEach(el => {
-      const k = el.getAttribute('data-key');
-      if(k) _tabrizSubLines[k] = el;
-    });
-  }
-  _tabrizPawHint  = document.getElementById('tabrizPawHint');
-  _tabrizFadeout  = document.getElementById('tabrizFadeout');
-  _tabrizFadein   = document.getElementById('tabrizFadein');
-  if(!_tabrizRoot || !_tabrizV1) return;
-
-  // 给每段 video 设 src + preload，全部先隐藏
-  const segs = [
-    [_tabrizV1, TABRIZ_VIDEO_URLS.v1],
-    [_tabrizV2, TABRIZ_VIDEO_URLS.v2],
-    [_tabrizV3, TABRIZ_VIDEO_URLS.v3],
-    [_tabrizV4, TABRIZ_VIDEO_URLS.v4],
-    [_tabrizV5, TABRIZ_VIDEO_URLS.v5],
-  ];
-  segs.forEach(([v, url]) => {
-    if(!v) return;
-    v.muted = true;
-    v.loop = false;
-    v.style.display = 'none';
-    v.classList.remove('active');
-    if(v.src !== url && v.currentSrc !== url){
-      v.src = url;
-      try { v.load(); } catch(_){}
-    }
-  });
-
-  // 每个 video 都绑 ended 事件：自动切到下一段
-  if(_tabrizV1) _tabrizV1.addEventListener('ended', _tabrizOnV1Ended);
-  if(_tabrizV2) _tabrizV2.addEventListener('ended', _tabrizOnV2Ended);
-  // V3 是 loop=true，不会触发 ended（由猫爪点击或超时切到 V4）
-  if(_tabrizV4) _tabrizV4.addEventListener('ended', _tabrizOnV4Ended);
-  if(_tabrizV5) _tabrizV5.addEventListener('ended', _tabrizOnV5Ended);
-  // V1 首次开播 → 触发入场黑场 fade-out（视频已经在动了再显示）
-  if(_tabrizV1) _tabrizV1.addEventListener('playing', _tabrizOnV1Playing);
-  // error 兜底
-  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
-    if(v) v.addEventListener('error', _tabrizOnVideoError);
-  });
-
-  // 猫爪热区点击 → 触发 V4（V3 期间）
-  if(_tabrizPawHint){
-    _tabrizPawHint.addEventListener('click', _tabrizOnPawClick);
-    _tabrizPawHint.addEventListener('touchend', _tabrizOnPawClick);
-  }
-}
-
-/* 切换显示的 video：旧的暂停隐藏，新的显示并播放 */
-function _tabrizSwitchToVideo(newVideo){
-  if(!newVideo) return;
-  // 暂停并隐藏其他段
-  [_tabrizV1, _tabrizV2, _tabrizV3, _tabrizV4, _tabrizV5].forEach(v => {
-    if(!v || v === newVideo) return;
-    try { v.pause(); } catch(_){}
-    v.classList.remove('active');
-    v.style.display = 'none';
-  });
-  // 显示并播放新段
-  newVideo.style.display = '';
-  newVideo.classList.add('active');
-  try { newVideo.currentTime = 0; } catch(_){}
-  _tabrizActiveVideo = newVideo;
-  _tabrizSafePlay(newVideo, _tabrizFinishScene);
-}
-
-function _tabrizOnVideoError(e){
-  console.warn('[tabriz] 视频错误', e && e.target && e.target.error);
-  _tabrizFinishScene();
-}
-
-/* V1 首次 playing 事件 → 启动入场黑场 fade-out。
-   关键：playing 事件在视频真正开始解码并产生新帧时才触发，此时移除遮罩
-   能保证用户看到的"渐显"内容是已经在动的画面，而不是冻结的首帧。
-   只触发一次（_tabrizFadeinStarted 标记），后续 V1 重播不再淡入。 */
-function _tabrizOnV1Playing(){
-  if(_tabrizFadeinStarted) return;
-  _tabrizFadeinStarted = true;
-  // 延 80ms 再淡出：给视频几帧的缓冲，避免有些设备 playing 事件早于真正出帧
-  setTimeout(()=>{
-    if(_tabrizFadein) _tabrizFadein.classList.remove('show');
-  }, 80);
-}
-
-/* 工具：尝试播放视频，失败兜底 */
-function _tabrizSafePlay(video, onFail){
-  if(!video) { if(onFail) onFail(); return; }
-  try {
-    const p = video.play();
-    if(p && typeof p.catch === 'function'){
-      p.catch(err => {
-        console.warn('[tabriz] 视频播放失败:', err && err.message);
-        if(onFail) onFail();
-      });
-    }
-  } catch(e){
-    console.warn('[tabriz] play 异常:', e);
-    if(onFail) onFail();
-  }
-}
-
-/* === V1：intro（工艺特写→拉远全景，约 7.7s） ===
-   V1 期间字幕：1.0s 起出第 1 句"350 个结"，停 4.5s 淡出。
-   后续 s2/s3 在 V2 进入时再排（V1 ended 触发 V2）。 */
-function _tabrizPlayV1(){
-  _tabrizCurState = TABRIZ_VIDEO_STATE.V1;
-  _tabrizSwitchToVideo(_tabrizV1);
-  _tabrizClearCaptionTimers();
-  _tabrizSubHideAll();
-  // 旧 caption 占位 DOM（已 display:none，再清防御）
-  if(_tabrizCap1) _tabrizCap1.classList.remove('show');
-  if(_tabrizCap2) _tabrizCap2.classList.remove('show');
-  // 字幕：s1（350 个结）—— 1.0s 起，停 4.5s
-  _tabrizSubShow('s1', 1000, [TABRIZ_VIDEO_STATE.V1, TABRIZ_VIDEO_STATE.V2]);
-  _tabrizSubHide('s1', 5500);
-}
-
-/* V1 自然结束 → 进 V2 */
-function _tabrizOnV1Ended(){
-  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V1) return;
-  _tabrizEnterV2State();
-}
-
-/* V1 → V2：push-in 推近到猫，一次性（约 7.7s）
-   V2 期间字幕节奏：
-   +0.8s  s2 "一个织工每天只能织一排，"  停 2.8s
-   +4.0s  s3 "一块 3×5 米的毯子，要织整整两年。"  停 2.8s
-   +6.9s（V2 末，约 15s 整）s4 "这一块，已经织了一年零四个月。"
-          这是金句，故意不淡出 —— 一直停到 V3 开始约 0.5s 后才悄悄消失，
-          让用户带着这句话看猫盯着毛线球的镜头。 */
-function _tabrizEnterV2State(){
-  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V2) return;
-  _tabrizCurState = TABRIZ_VIDEO_STATE.V2;
-  _tabrizSwitchToVideo(_tabrizV2);
-  _tabrizClearCaptionTimers();
-  _tabrizSubHideAll();
-  // s2：织工每天只能织一排
-  _tabrizSubShow('s2', 800, [TABRIZ_VIDEO_STATE.V2]);
-  _tabrizSubHide('s2', 3600);
-  // s3：3×5 米要织两年
-  _tabrizSubShow('s3', 4000, [TABRIZ_VIDEO_STATE.V2]);
-  _tabrizSubHide('s3', 6800);
-  // s4：金句，撑到 V3 中段（V3 是 loop，可能 ~3s 后被点击 → V4，
-  //     V4 进入会 clear caption timers + hideAll，因此最坏 ~3s 后被强制清空，
-  //     最好情况 s4 显示约 6s + V3 整段 ~3s ≈ 9s 沉浸）
-  _tabrizSubShow('s4', 6900, [TABRIZ_VIDEO_STATE.V2, TABRIZ_VIDEO_STATE.V3]);
-  console.log('[tabriz] V1 结束，进入 V2');
-}
-
-/* V2 自然结束 → 进 V3 */
-function _tabrizOnV2Ended(){
-  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V2) return;
-  _tabrizEnterV3State();
-}
-
-/* V2 → V3：paw 猫看毛线球，loop=true 循环，等用户点击 */
-function _tabrizEnterV3State(){
-  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V3) return;
-  _tabrizCurState = TABRIZ_VIDEO_STATE.V3;
-  if(_tabrizV3) _tabrizV3.loop = true;
-  _tabrizSwitchToVideo(_tabrizV3);
-  console.log('[tabriz] V2 结束，进入 V3（loop=true）');
-  // 显示猫爪点击热区（600ms 后浮现）
-  if(_tabrizPawHint){
-    setTimeout(()=>{
-      if(_tabrizCurState === TABRIZ_VIDEO_STATE.V3) _tabrizPawHint.classList.add('show');
-    }, 600);
-  }
-  // 30 秒无操作 → 自动触发 V4
-  _tabrizClearTimers();
-  _tabrizV3Timer = setTimeout(()=>{
-    if(_tabrizCurState === TABRIZ_VIDEO_STATE.V3){
-      console.log('[tabriz] V3 超时，自动触发 V4');
-      _tabrizEnterV4State();
-    }
-  }, TABRIZ_V3_AUTO_TIMEOUT);
-}
-
-/* 猫爪点击 → 触发 V4 */
-function _tabrizOnPawClick(e){
-  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V3) return;
-  if(e && e.preventDefault) e.preventDefault();
-  _tabrizEnterV4State();
-}
-
-/* V3 → V4：chase 猫追线 + 织机被扯（约 10.5s）
-   V4 期间字幕节奏（第二段：战争破坏了什么）：
-   +0.6s  c1 "2026 年 4 月 12 日。"（quiet）  停 3.4s
-   +3.0s  c2 "导弹擦过 Tabriz 巴扎的屋顶。"   停 4s
-   +7.5s  c3 "一根丝线、一根丝线，倒着退了回去。"
-          —— 关键：撞上 V4 末段织机被扯断、第一根线被拉走的画面（约第 7~9s）
-          c3 不在 V4 内淡出，让它跨段一直持续到 V5 中段，与"地毯解构"+"逐渐模糊"叠加情绪 */
-function _tabrizEnterV4State(){
-  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V4) return;
-  _tabrizCurState = TABRIZ_VIDEO_STATE.V4;
-  _tabrizClearTimers();
-  _tabrizClearCaptionTimers();
-  _tabrizSubHideAll();
-  // 隐藏热区
-  if(_tabrizPawHint) _tabrizPawHint.classList.remove('show');
-  // 关闭 V3 的 loop（防止重新进入场景时残留状态）
-  if(_tabrizV3) _tabrizV3.loop = false;
-  _tabrizSwitchToVideo(_tabrizV4);
-  // 第二段叙事：3 句铺陈
-  _tabrizSubShow('c1', 600,  [TABRIZ_VIDEO_STATE.V4]);
-  _tabrizSubHide('c1', 4000);
-  _tabrizSubShow('c2', 3000, [TABRIZ_VIDEO_STATE.V4]);
-  _tabrizSubHide('c2', 7000);
-  // c3 金句：对齐 V4 第 7.5s 的"线头被拉"画面，跨到 V5 才淡出
-  _tabrizSubShow('c3', 7500, [TABRIZ_VIDEO_STATE.V4, TABRIZ_VIDEO_STATE.V5]);
-  console.log('[tabriz] 进入 V4，启动第二段字幕');
-}
-
-/* V4 自然结束 → 进 V5 */
-function _tabrizOnV4Ended(){
-  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V4) return;
-  _tabrizEnterV5State();
-}
-
-/* V4 → V5：unravel 地毯解构收尾（约 14.9s）
-   同步：给 V5 video 加 .v5-blur，触发 14s 的 filter 渐变。
-   V5 期间字幕节奏（接续 V4 c3 金句）：
-   +3s  c3 淡出（让"丝线退回"在 V5 前 3s 持续覆盖解构画面 → 共显约 6s）
-   +4s  c4 "他们说，毯子烧了可以再织一块。"（quiet）  停 4s
-   +9s  c5 "但织进去的一年零四个月，回不来了。"
-        —— 不淡出，跟随视频模糊到黑，最后情绪落点 */
-function _tabrizEnterV5State(){
-  if(_tabrizCurState === TABRIZ_VIDEO_STATE.V5) return;
-  _tabrizCurState = TABRIZ_VIDEO_STATE.V5;
-  _tabrizSwitchToVideo(_tabrizV5);
-  // 触发逐渐模糊：延 100ms 加 class，确保 transition 起点是清晰帧
-  if(_tabrizV5){
-    setTimeout(()=>{
-      if(_tabrizCurState === TABRIZ_VIDEO_STATE.V5 && _tabrizV5){
-        _tabrizV5.classList.add('v5-blur');
-      }
-    }, 100);
-  }
-  // 注意：不清空 V4 排的 c3 timer —— c3 设计为跨段持续到 V5 中段
-  // 但要清掉 c1/c2 的残余（防御）
-  if(_tabrizSubLines){
-    if(_tabrizSubLines.c1) _tabrizSubLines.c1.classList.remove('show');
-    if(_tabrizSubLines.c2) _tabrizSubLines.c2.classList.remove('show');
-  }
-  // c3 金句：进入 V5 后再持续 3s，然后淡出
-  _tabrizSubHide('c3', 3000);
-  // c4：转折 quiet
-  _tabrizSubShow('c4', 4000, [TABRIZ_VIDEO_STATE.V5]);
-  _tabrizSubHide('c4', 8000);
-  // c5：最终落点 —— 不主动 hide，让它和模糊画面一起渐黑
-  _tabrizSubShow('c5', 9000, [TABRIZ_VIDEO_STATE.V5]);
-  console.log('[tabriz] V4 结束，进入 V5（启动逐渐模糊 + 第二段尾声字幕）');
-}
-
-/* V5 自然结束 → 收尾 */
-function _tabrizOnV5Ended(){
-  if(_tabrizCurState !== TABRIZ_VIDEO_STATE.V5) return;
-  _tabrizFinishScene();
-}
-
-/* 收尾：黑屏过渡 → 自动回地图 */
-function _tabrizFinishScene(){
-  if(_tabrizCurState === TABRIZ_VIDEO_STATE.DONE) return;
-  _tabrizCurState = TABRIZ_VIDEO_STATE.DONE;
-  if(_tabrizFadeout){
-    _tabrizFadeout.classList.add('show');
-  }
-  setTimeout(()=>{
-    if(typeof returnToMap === 'function' && _tabrizCurState === TABRIZ_VIDEO_STATE.DONE){
-      returnToMap();
-    }
-  }, 1500);
-}
-
-/* 工具：清理定时器 */
-function _tabrizClearTimers(){
-  if(_tabrizV3Timer){ clearTimeout(_tabrizV3Timer); _tabrizV3Timer = null; }
-}
-function _tabrizClearCaptionTimers(){
-  _tabrizCaptionTimers.forEach(t => clearTimeout(t));
-  _tabrizCaptionTimers = [];
-}
-
-/* === 字幕调度 ===
-   _tabrizSubShow(key, atMs)：在 atMs 毫秒后显示字幕
-   _tabrizSubHide(key, atMs)：在 atMs 毫秒后隐藏字幕
-   guardState：可选，仅当切换时仍处于该状态/状态数组时才执行（防跨段串台） */
-function _tabrizSubShow(key, atMs, guardStates){
-  if(!_tabrizSubLines || !_tabrizSubLines[key]) return;
-  _tabrizCaptionTimers.push(setTimeout(()=>{
-    if(guardStates){
-      const arr = Array.isArray(guardStates) ? guardStates : [guardStates];
-      if(!arr.includes(_tabrizCurState)) return;
-    }
-    _tabrizSubLines[key].classList.add('show');
-  }, atMs));
-}
-function _tabrizSubHide(key, atMs){
-  if(!_tabrizSubLines || !_tabrizSubLines[key]) return;
-  _tabrizCaptionTimers.push(setTimeout(()=>{
-    _tabrizSubLines[key].classList.remove('show');
-  }, atMs));
-}
-/* 清空所有字幕（不清 timer，仅立即隐藏） */
-function _tabrizSubHideAll(){
-  if(!_tabrizSubLines) return;
-  Object.values(_tabrizSubLines).forEach(el => el && el.classList.remove('show'));
-}
-
 
 
 
@@ -3175,21 +3170,17 @@ function enterScene(idx){
   smoothYaw = PANO_YAW_OFFSET;
   smoothPitch = 0;
 
-  // === 判断是否走新管线（场景 1 golestan 实体模型 / 场景 2 tabriz 程序化作坊） ===
+  // === 判断是否走新管线（场景 1 golestan 实体模型） ===
   const isGolestan = (coord.modelId === 'golestan');
   const golestanReady = isGolestan && MODELS.golestan.gltfScene;
-  const isTabriz = (coord.modelId === 'tabriz');
 
-  // 防御：进入新场景前，清理上一场景的"实体"残留（吊灯/作坊不应跨场景共存）
+  // 防御：进入新场景前，清理上一场景的"实体"残留（吊灯不应跨场景共存）
   if(!isGolestan && MODELS.golestan && MODELS.golestan.frameGroup && MODELS.golestan.frameGroup.parent){
     cleanupChandelierScene();
   }
-  if(!isTabriz && MODELS.tabriz && MODELS.tabriz.active){
-    cleanupCarpetScene();
-  }
 
   // 新管线统一标记：进入新管线场景（隐藏粒子系统、启用 sceneGroup）
-  const newPipelineReady = golestanReady || isTabriz;
+  const newPipelineReady = golestanReady;
 
   if(golestanReady){
     // 场景 1：吊灯实体
@@ -3200,9 +3191,6 @@ function enterScene(idx){
       geometry.getAttribute('aSize').needsUpdate = true;
       geometry.getAttribute('aColor').needsUpdate = true;
     }
-  } else if(isTabriz){
-    // 场景 2：地毯作坊程序化场景
-    enterCarpetScene();
   } else {
     // 旧管线（其他粒子场景）
     if(coord.modelId && coord.sceneReady) buildSceneTargets(coord.modelId);
@@ -3245,12 +3233,8 @@ function enterScene(idx){
   if(panoBurnSphere){
     panoBurnSphere.visible = false;
     panoBurnSphere.material.uniforms.uProgress.value = -0.2;
-    // 根据当前场景设置烧灼方向：tabriz 从地面向上、其他默认从穹顶向下
-    if(coord.modelId === 'tabriz'){
-      panoBurnSphere.material.uniforms.uBurnDir.value.set(0, -1, 0);
-    } else {
-      panoBurnSphere.material.uniforms.uBurnDir.value.set(0, 1, 0);
-    }
+    // 烧灼方向：从穹顶向下
+    panoBurnSphere.material.uniforms.uBurnDir.value.set(0, 1, 0);
   }
 
   // 全景图 skybox
@@ -3260,6 +3244,7 @@ function enterScene(idx){
   const panoTex = panoTextures[sceneIdForPano];
   if(coord.panoUrl && panoTex && panoTex !== 'loading'){
     scene.background = panoTex;
+    _currentDisplayTex = panoTex;
     panoDimSphere.visible = true;
     // 新管线场景降低暗化（让全景更亮）
     panoDimSphere.material.opacity = newPipelineReady ? 0.18 : 0.55;
@@ -3267,16 +3252,12 @@ function enterScene(idx){
     if(sceneBgEl) sceneBgEl.style.display = 'none';
     renderer.setClearColor(0x000000, 1);
   } else {
-    // 无 panoUrl（如 Tabriz）：靠 DOM 海报图层 .tabriz-bg-layer 充当远景
+    // 无 panoUrl 的场景：纯黑背景
     scene.background = null;
-    panoDimSphere.visible = !coord.modelId;  // Tabriz 不要 dim sphere
+    _currentDisplayTex = null;
+    panoDimSphere.visible = !coord.modelId;
     panoDimSphere.material.opacity = newPipelineReady ? 0.18 : 0.55;
-    // Tabriz 特别处理：用透明清屏，让底下 DOM 海报背景层透上来
-    if(sceneIdForPano === 'tabriz'){
-      renderer.setClearColor(0x000000, 0);
-    } else {
-      renderer.setClearColor(0x000000, 1);
-    }
+    renderer.setClearColor(0x000000, 1);
   }
   // 启用反光光点（仅 golestan 场景）
   sparkleGroup.visible = (sceneIdForPano === 'golestan');
@@ -3296,14 +3277,6 @@ function enterScene(idx){
     // 吊灯在世界原点(0,0,0)；相机在水平圆轨道上、稍低于吊灯仰视
     const orbitRadius = 100;
     const orbitY = -35;
-    camera.position.set(0, orbitY, orbitRadius);
-    cameraTarget.set(0, 0, 0);
-    camera.lookAt(cameraTarget);
-  } else if(isTabriz){
-    // 织机在世界原点附近、用户站在它正前方稍偏低，平视
-    // 织机高度 LOOM_H=160，相机距 ~140，正中央平视即可看到织机全貌
-    const orbitRadius = 145;
-    const orbitY = -10;  // 略低于织机中心，仰视感
     camera.position.set(0, orbitY, orbitRadius);
     cameraTarget.set(0, 0, 0);
     camera.lookAt(cameraTarget);
@@ -3331,9 +3304,9 @@ function enterScene(idx){
       autoRotateYaw = 0;
       autoRotateSpeed = AUTO_ROTATE_SPEED_BASE;
       _autoRotateBoostStart = 0;
-      // 触发提示文案：吊灯="tap to shatter"，地毯="tap to interrupt"
-      const hintWord = isTabriz ? 'interrupt' : 'shatter';
-      pressHintEl.innerHTML = `tap to ${hintWord} <span class="dot"></span><span class="dot"></span><span class="dot"></span>`;
+      // 触发提示文案：吊灯（已按需求去掉 "tap to shatter" 文字，仅保留逻辑流，不再显示提示）
+      pressHintEl.innerHTML = '';
+      // 不再显示 pressHint（按需求隐藏所有 tap-to 引导文字）
       setTimeout(()=>{
         if(mode===MODE.SCENE) pressHintEl.classList.add('show');
       }, 1200);
@@ -3396,8 +3369,6 @@ function chainToNextScene(){
   // 清理当前场景的"实体"残留
   const wasGolestan = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
   if(wasGolestan) cleanupChandelierScene();
-  const wasTabriz = COORDINATES[currentSceneIdx]?.modelId === 'tabriz' && MODELS.tabriz.active;
-  if(wasTabriz) cleanupCarpetScene();
 
   // 隐藏当前 UI 残留
   nextHint.classList.remove('show');
@@ -3424,9 +3395,6 @@ function returnToMap(){
   // 清理场景 1 新管线（如果活跃）
   const wasGolestan = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
   if(wasGolestan) cleanupChandelierScene();
-  // 清理场景 2 地毯作坊（如果活跃）
-  const wasTabriz = COORDINATES[currentSceneIdx]?.modelId === 'tabriz' && MODELS.tabriz.active;
-  if(wasTabriz) cleanupCarpetScene();
 
 
   mode = MODE.TRANSITION;
@@ -3456,6 +3424,7 @@ function returnToMap(){
 
   // 退出场景：移除全景图 skybox，恢复 FOV
   scene.background = null;
+  _currentDisplayTex = null;
   currentPanoId = null;
   panoDimSphere.visible = false;  // 隐藏暗化蒙层
   // 隐藏反光光点
@@ -3531,15 +3500,14 @@ let autoRotateActive = false;
 let autoRotateYaw = 0;            // 累计的自动旋转角度（弧度），叠加到 camYaw 上
 const AUTO_ROTATE_SPEED_BASE = 0.06;  // 进场默认速度（弧度/秒，约 3.4°/秒）
 let autoRotateSpeed = AUTO_ROTATE_SPEED_BASE;
+// 用户最后一次主动操作（拖拽/陀螺仪转动）的时间戳，用于"3 秒静止恢复自动旋转"
+let _lastUserInteractTime = 0;
+const AUTO_ROTATE_RESUME_AFTER = 3000;  // 3 秒
 // 碎裂加速过冲：起爆瞬间从 base 飙到 peak，1.2s 内回落到 settle
 let _autoRotateBoostStart = 0;     // 0 表示无 boost；>0 表示 boost 起始 performance.now()
 const AUTO_ROTATE_BOOST_PEAK   = 0.6;  // 峰值（弧度/秒，约 34°/秒，3 倍冲击感）
 const AUTO_ROTATE_BOOST_SETTLE = 0.18; // 稳态（弧度/秒，约 10°/秒，3 倍 base）
 const AUTO_ROTATE_BOOST_DUR    = 1200; // 过冲持续时间（ms）
-
-/* ===================================================================
- * Tabriz：旧 3D 相机管线已废弃（改为 DOM 视频驱动，无相机控制）
- * =================================================================== */
 
 
 // 平滑旋转：camYaw 是目标值（拖拽/陀螺仪即时更新），smoothYaw 做插值跟随
@@ -3661,10 +3629,9 @@ canvas.addEventListener('pointerdown', (e)=>{
   dragStartYaw = camYaw;
 
   if(mode === MODE.SCENE){
-    // 新管线（吊灯/地毯）：不需要长按聚合粒子
+    // 新管线（吊灯）：不需要长按聚合粒子
     const isGolestanNew = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
-    const isTabrizNew = COORDINATES[currentSceneIdx]?.modelId === 'tabriz' && MODELS.tabriz.active;
-    if(!isGolestanNew && !isTabrizNew){
+    if(!isGolestanNew){
       pointerActive = true;
       pressPointerStartX = e.clientX; pressPointerStartY = e.clientY;
       sceneStartPress();
@@ -3679,6 +3646,10 @@ window.addEventListener('pointermove', (e)=>{
   // 用户产生真实拖拽位移即关闭自动旋转（单击 tap 不会触发，因为 tap 几乎无位移）
   if(autoRotateActive && (Math.abs(dx) > 4 || Math.abs(dy) > 4)){
     autoRotateActive = false;
+  }
+  // 记录用户操作时间戳（拖拽中持续刷新），3 秒静止后会自动恢复旋转
+  if(Math.abs(dx) > 2 || Math.abs(dy) > 2){
+    _lastUserInteractTime = performance.now();
   }
 
   if(mode === MODE.SCENE && sceneState === SCENE_STATE.GATHERING){
@@ -3728,9 +3699,6 @@ window.addEventListener('pointerup', (e)=>{
       }
     }
   }
-
-  // 场景 2（Tabriz 视频版）：点击不通过 raycaster，直接由 DOM 热区 .tabriz-paw-hint 监听
-
 
   if(pointerActive){
     pointerActive = false;
@@ -3819,20 +3787,23 @@ nextHint.addEventListener('click', chainToNextScene);
 function setupGyro(){
   if(!('DeviceOrientationEvent' in window)) return;
   if(typeof DeviceOrientationEvent.requestPermission === 'function'){
-    gyroAsk.classList.add('show');
-    gyroAllowBtn.addEventListener('click', async ()=>{
+    /* iOS：不弹自定义授权页，改为首次用户交互（点击/触摸）时静默请求权限。
+     * 用户已授权 → 启用陀螺仪；拒绝/失败 → 静默回退到纯拖动，不打扰用户。 */
+    const tryRequest = async () => {
       try{
         const state = await DeviceOrientationEvent.requestPermission();
         if(state === 'granted'){
           window.addEventListener('deviceorientation', onDeviceOrientation);
           useGyro = true;
         }
-      }catch(e){}
-      gyroAsk.classList.remove('show');
-    });
-    gyroDenyBtn.addEventListener('click', ()=>{
-      gyroAsk.classList.remove('show');
-    });
+      }catch(e){ /* 静默忽略 */ }
+      window.removeEventListener('touchstart', tryRequest);
+      window.removeEventListener('click', tryRequest);
+    };
+    window.addEventListener('touchstart', tryRequest, { once: true, passive: true });
+    window.addEventListener('click', tryRequest, { once: true });
+    /* 防御性：如果旧 DOM 仍然存在 gyroAsk 元素，强制隐藏 */
+    if(typeof gyroAsk !== 'undefined' && gyroAsk) gyroAsk.style.display = 'none';
   } else if(isMobile){
     window.addEventListener('deviceorientation', onDeviceOrientation);
     useGyro = true;
@@ -3846,7 +3817,13 @@ function onDeviceOrientation(e){
   let yaw = (a - gyroYawOffset) * Math.PI / 180;
   while(yaw > Math.PI) yaw -= 2*Math.PI;
   while(yaw < -Math.PI) yaw += 2*Math.PI;
-  gyroYaw = -yaw;
+  const newGyroYaw = -yaw;
+  // 检测陀螺仪显著变化 → 视为用户主动操作，关闭自动旋转 + 刷新静止计时
+  if(Math.abs(newGyroYaw - gyroYaw) > 0.01){
+    if(autoRotateActive) autoRotateActive = false;
+    _lastUserInteractTime = performance.now();
+  }
+  gyroYaw = newGyroYaw;
 
   // —— Pitch（beta）：前后倾斜 ——
   // beta: 0=平放, 90=竖直, 负值=向后仰
@@ -3931,7 +3908,11 @@ function tick(){
       sparkleMotion += (target - sparkleMotion) * 0.04;
     }
     // 静止时给一点 idle baseline（0.08），让用户偶尔能瞥到光点
-    const motionLevel = Math.max(sparkleMotion, 0.08);
+    // —— 自动旋转期间帧间 dYaw 太小（0.001 rad/帧），需要给一个固定加成才有明显闪烁
+    let motionLevel = Math.max(sparkleMotion, 0.08);
+    if(autoRotateActive){
+      motionLevel = Math.max(motionLevel, 0.55);  // 自动旋转时拉到 0.55，闪烁明显
+    }
 
     const targetOp = (mode === MODE.SCENE) ? 1.0 : 0;
     sparkleMat.uniforms.uOpacity.value += (targetOp - sparkleMat.uniforms.uOpacity.value) * 0.06;
@@ -4033,6 +4014,17 @@ function tick(){
       camera.lookAt(lookTarget);
 
     } else if(mode === MODE.SCENE){
+      // —— 静止 3 秒后自动恢复旋转（仅 SCENE 模式 + 不在拖拽中 + 不在终幕烧灼中）——
+      if(!autoRotateActive && !dragging && _lastUserInteractTime > 0
+         && !document.body.classList.contains('finale-on')){
+        const idleMs = performance.now() - _lastUserInteractTime;
+        if(idleMs > AUTO_ROTATE_RESUME_AFTER){
+          autoRotateActive = true;
+          autoRotateSpeed = AUTO_ROTATE_SPEED_BASE;
+          _autoRotateBoostStart = 0;  // 不走 boost 曲线，直接平稳速度恢复
+          _lastUserInteractTime = 0;  // 防重复触发
+        }
+      }
       // 自动慢速旋转：进场时启用，用户首次拖拽时关闭
       if(autoRotateActive && !dragging){
         // 检查是否处于碎裂 boost 期间
@@ -4057,9 +4049,12 @@ function tick(){
       smoothYaw   += (targetYaw   - smoothYaw)   * lerpSpeed;
       smoothPitch += (targetPitch - smoothPitch) * lerpSpeed;
 
-      // 判断是否是新管线（吊灯）场景；Tabriz 视频版无 3D 相机
+      // 判断是否是吊灯新管线场景
       const isGolestanCam = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
-      if(isGolestanCam){
+      // 子场景全景图模式：从镜宫进入子场景时 currentSceneIdx 没变，isGolestanCam 仍为 true，
+      // 但用户已经在子场景全景图里，必须走"平视全景"分支（赤道线 y=0），不能再用吊灯轨道（y=-35 仰视）
+      const _isDirPanoMode = (typeof _dirCurrentSceneIdx !== 'undefined') && _dirCurrentSceneIdx >= 0;
+      if(isGolestanCam && !_isDirPanoMode){
         // 吊灯在原点，相机在水平圆轨道上微仰视
         const orbitR = 100;
         const orbitY = -35;
@@ -4067,6 +4062,13 @@ function tick(){
         camera.position.y = orbitY + smoothPitch * 15;
         camera.position.z = -Math.cos(smoothYaw) * orbitR;
         camera.lookAt(0, 0, 0);
+      } else if(_isDirPanoMode){
+        // 子场景全景图：相机贴近球心，平视赤道线（lookY=0），消除仰角偏移
+        const orbitR = 0.1;  // 极小值，相机几乎在球心，让全景图视觉上"无限远"
+        camera.position.x = -Math.sin(smoothYaw) * orbitR;
+        camera.position.y = 0 + smoothPitch * 30;
+        camera.position.z = -Math.cos(smoothYaw) * orbitR;
+        camera.lookAt(-Math.sin(smoothYaw) * 100, 0, -Math.cos(smoothYaw) * 100);
       } else {
         const sc = computeSceneCamera();
         const orbitR = sc.z;
@@ -4389,8 +4391,6 @@ function tick(){
     updateChandelierCollapse(dt, time);
   }
 
-  // 场景 2 Tabriz 视频版：每帧无需推进（视频自己播）
-
   // 始终用标准渲染（保持 canvas alpha 透明，CSS 背景可见）
   renderer.render(scene, camera);
 
@@ -4409,13 +4409,17 @@ function tick(){
 function onResize(){
   renderer.setSize(window.innerWidth, window.innerHeight);
   camera.aspect = window.innerWidth / window.innerHeight;
-  // 如果在 golestan 新管线场景，动态调整 FOV（Tabriz 视频版无 3D 相机）
+  // 如果在 golestan 新管线场景，动态调整 FOV
+  // 但子场景全景模式下（directory.js 接管 FOV），不要覆盖
   const isGolestan = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
-  if(mode === MODE.SCENE && isGolestan){
+  const isDirSubScene = (typeof _dirCurrentSceneIdx !== 'undefined') && _dirCurrentSceneIdx >= 0;
+  if(mode === MODE.SCENE && isGolestan && !isDirSubScene){
     const aspect = camera.aspect;
     const baseFov = 65;
     const fov = Math.round(baseFov / Math.max(aspect, 0.4));
     camera.fov = THREE.MathUtils.clamp(fov, 45, 100);
+  } else if(isDirSubScene && typeof DIR_PANO_FOV !== 'undefined'){
+    camera.fov = DIR_PANO_FOV;
   }
   camera.updateProjectionMatrix();
   // bloom 层同步尺寸
