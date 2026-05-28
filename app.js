@@ -921,9 +921,10 @@ scene.add(sparkleGroup);
 
 // —— A. 密集小光点（球面分布，让镜宫更富丽堂皇）
 //    480 颗"原始组合"（大/中/小都有，奠定富丽堂皇的层次感）
-//    + 1200 颗纯小颗加密（让画面更细腻闪烁，不增加大颗）
+//    + 3200 颗纯小颗加密（让画面更细腻闪烁，不增加大颗）
+//    总计 3680 颗：单 drawcall, 不增加 fill rate（小颗 size≈1.5~4）
 const SPARKLE_BASE = 480;          // 原来的层次组合
-const SPARKLE_DENSE = 1200;        // 新增的纯小颗加密层
+const SPARKLE_DENSE = 3200;        // 新增的纯小颗加密层（更"满天繁星"）
 const SPARKLE_COUNT = SPARKLE_BASE + SPARKLE_DENSE;
 const SPARKLE_RADIUS = 900;
 const sparkleGeo = new THREE.BufferGeometry();
@@ -958,8 +959,9 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
     else if(r < 0.62) sparkleSize[i] = 13 + Math.random() * 8;    // 中颗（40% / 13~21）
     else              sparkleSize[i] = 6 + Math.random() * 6;     // 小颗（38% / 6~12）
   } else {
-    // 后 1200 颗：全部小颗（3~8 范围），让镜面像被无数细密水晶覆盖
-    sparkleSize[i] = 3 + Math.random() * 5;
+    // 后 3200 颗：全部超细小颗（2~6 范围），让镜面像被无数细密水晶覆盖
+    // 尺寸更小→fill rate 几乎不增加，但视觉上"密度感"翻倍
+    sparkleSize[i] = 2 + Math.random() * 4;
   }
 }
 sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
@@ -990,19 +992,25 @@ const sparkleMat = new THREE.ShaderMaterial({
       float facing = clamp(dot(dirView, toCamView) * 0.5 + 0.5, 0.0, 1.0);
       facing = pow(facing, 1.4);
 
-      // 慢速基础闪烁（每颗节奏不同）
-      float twinkle = 0.55 + 0.45 * sin(uTime * 1.8 + aSeed * 6.2831);
-      // 快速尖脉冲
-      float fast = sin(uTime * 5.2 + aSeed * 12.57);
-      float flash = pow(max(fast, 0.0), 6.0);
-      vFlash = flash * uMotion; // 尖闪也只在运动时出现
+      // 慢速基础闪烁（每颗节奏不同）—— 频率更快 + 振幅更大
+      float twinkle = 0.45 + 0.55 * sin(uTime * 2.6 + aSeed * 6.2831);
+      // 第一组：中频尖脉冲
+      float fast = sin(uTime * 5.8 + aSeed * 12.57);
+      float flash = pow(max(fast, 0.0), 5.0);
+      // 第二组：高频细密脉冲（每颗节奏完全不同，形成"星空闪烁"层）
+      float fast2 = sin(uTime * 8.7 + aSeed * 19.83);
+      float flash2 = pow(max(fast2, 0.0), 7.0);
+      // 双频叠加
+      float combined = flash + flash2 * 0.85;
+      vFlash = combined * uMotion;
 
       // 总亮度 = facing * twinkle * 运动强度
-      // 静止时 uMotion≈0 → vAlpha≈0 → 几乎不可见
-      vAlpha = facing * twinkle * uMotion;
+      // 静止时给一个微弱基底（0.08），让光点"任何时候都在闪"
+      float intensity = 0.08 + 0.92 * uMotion;
+      vAlpha = facing * twinkle * intensity;
 
-      // 闪光瞬间放大颗粒（仅运动时）
-      float sizeBoost = 1.0 + vFlash * 0.8;
+      // 闪光瞬间放大颗粒（仅运动时）—— 放大幅度从 0.8 → 1.3
+      float sizeBoost = 1.0 + vFlash * 1.3;
       gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0));
       // 最小尺寸下调到 1.5px：让加密的小颗保持"细密针尖感"，不被强制放大
       gl_PointSize = max(gl_PointSize, 1.5);
@@ -1034,12 +1042,13 @@ const sparkleMat = new THREE.ShaderMaterial({
       float star = crossLine * starEnv;
 
       // 组合：核心 + 柔晕 始终存在，星芒只在 flash 瞬间显著
-      float shape = core + halo + star * (0.25 + vFlash * 1.4);
+      float shape = core + halo + star * (0.25 + vFlash * 1.8);
 
       vec3 warm = vec3(1.0, 0.94, 0.78);
       vec3 cool = vec3(1.0, 1.0, 1.0);
       vec3 col = mix(warm, cool, clamp(vFlash, 0.0, 1.0));
-      col *= 1.0 + vFlash * 0.6;
+      // flash 瞬间亮度爆发更强（0.6 → 1.0）
+      col *= 1.0 + vFlash * 1.0;
 
       float a = shape * vAlpha * uOpacity;
       if(a < 0.005) discard;
