@@ -964,11 +964,11 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
   sparkleSeed[i] = Math.random() * 100;
 
   if(i < SPARKLE_BASE){
-    // 前 480 颗：保留原"富丽堂皇"层次配比
+    // 前 480 颗：层次配比（大颗大幅缩减，避免运动时一堆十字大花显假）
     const r = Math.random();
-    if(r < 0.22)      sparkleSize[i] = 22 + Math.random() * 12;   // 大颗（22% / 22~34）
-    else if(r < 0.62) sparkleSize[i] = 13 + Math.random() * 8;    // 中颗（40% / 13~21）
-    else              sparkleSize[i] = 6 + Math.random() * 6;     // 小颗（38% / 6~12）
+    if(r < 0.08)      sparkleSize[i] = 14 + Math.random() * 8;    // 大颗（8% / 14~22，原 22% / 22~34）
+    else if(r < 0.45) sparkleSize[i] = 10 + Math.random() * 6;    // 中颗（37% / 10~16）
+    else              sparkleSize[i] = 5 + Math.random() * 5;     // 小颗（55% / 5~10）
   } else {
     // 后 3200 颗：全部超细小颗（2~6 范围），让镜面像被无数细密水晶覆盖
     // 尺寸更小→fill rate 几乎不增加，但视觉上"密度感"翻倍
@@ -1020,8 +1020,9 @@ const sparkleMat = new THREE.ShaderMaterial({
       float intensity = 0.08 + 0.92 * uMotion;
       vAlpha = facing * twinkle * intensity;
 
-      // 闪光瞬间放大颗粒（仅运动时）—— 放大幅度从 0.8 → 1.3
-      float sizeBoost = 1.0 + vFlash * 1.3;
+      // 闪光瞬间放大颗粒（仅运动时）—— 放大幅度从 ×1.3 收敛到 ×0.7
+      // 避免运动时大颗"爆开"成屏幕上的大十字花（显假）
+      float sizeBoost = 1.0 + vFlash * 0.7;
       gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0));
       // 最小尺寸下调到 1.5px：让加密的小颗保持"细密针尖感"，不被强制放大
       gl_PointSize = max(gl_PointSize, 1.5);
@@ -1053,13 +1054,14 @@ const sparkleMat = new THREE.ShaderMaterial({
       float star = crossLine * starEnv;
 
       // 组合：核心 + 柔晕 始终存在，星芒只在 flash 瞬间显著
-      float shape = core + halo + star * (0.25 + vFlash * 1.8);
+      // 收敛 vFlash 增益（1.8 → 0.9），运动时不再爆开成大十字花
+      float shape = core + halo + star * (0.20 + vFlash * 0.9);
 
       vec3 warm = vec3(1.0, 0.94, 0.78);
       vec3 cool = vec3(1.0, 1.0, 1.0);
       vec3 col = mix(warm, cool, clamp(vFlash, 0.0, 1.0));
-      // flash 瞬间亮度爆发更强（0.6 → 1.0）
-      col *= 1.0 + vFlash * 1.0;
+      // flash 瞬间亮度爆发（×1.0 → ×0.65 更克制）
+      col *= 1.0 + vFlash * 0.65;
 
       float a = shape * vAlpha * uOpacity;
       if(a < 0.005) discard;
