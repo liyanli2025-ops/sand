@@ -932,8 +932,8 @@ scene.add(sparkleGroup);
 
 // —— A. 密集小光点（球面分布，让镜宫更富丽堂皇）
 //    480 颗"原始组合"（大/中/小都有，奠定富丽堂皇的层次感）
-//    + 8000 颗纯小颗加密（让画面更细腻闪烁，不增加大颗）
-//    总计 8480 颗：单 drawcall, 不增加 fill rate（小颗 size≈2~6）
+//    + 8000 颗小颗加密（让画面更细腻闪烁，不增加大颗）
+//    总计 8480 颗：单 drawcall, 不增加 fill rate（小颗 size≈5~12，屏幕 1.6~4px）
 const SPARKLE_BASE = 480;          // 原来的层次组合
 const SPARKLE_DENSE = 8000;        // 新增的纯小颗加密层（满天繁星·密集版）
 const SPARKLE_COUNT = SPARKLE_BASE + SPARKLE_DENSE;
@@ -970,9 +970,11 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
     else if(r < 0.45) sparkleSize[i] = 10 + Math.random() * 6;    // 中颗（37% / 10~16）
     else              sparkleSize[i] = 5 + Math.random() * 5;     // 小颗（55% / 5~10）
   } else {
-    // 后 3200 颗：全部超细小颗（2~6 范围），让镜面像被无数细密水晶覆盖
-    // 尺寸更小→fill rate 几乎不增加，但视觉上"密度感"翻倍
-    sparkleSize[i] = 2 + Math.random() * 4;
+    // 后 8000 颗：小颗加密层（5~12 范围）
+    // 球壳半径 900，距离衰减 300/900≈0.33，size 5~12 → 屏幕上 1.6~4px
+    // 之前 2~6 会被 max(1.5) 卡死全锁 1.5px → 加密肉眼几乎不可见
+    // 现在拉到 5~12，加密层真正能看出"细密水晶覆盖"的密度感
+    sparkleSize[i] = 5 + Math.random() * 7;
   }
 }
 sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
