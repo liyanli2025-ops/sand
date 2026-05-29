@@ -641,7 +641,7 @@ function _restoreHomeFov(){
  * 必须用静态字面量（避免 page-deploy 拼接陷阱）
  * ---------------------------------------------------------------- */
 var DIR_PANO_MAP = {
-  shrine:    './assets/pano-shrine.jpg',
+  shrine:    './assets/pano-shrine_v2.jpg',
   aliqapu:   './assets/pano-aliqapu.jpg',
   music:     './assets/pano-music.jpg',
   caravan:   './assets/pano-caravan.jpg',
