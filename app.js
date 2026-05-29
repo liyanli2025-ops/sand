@@ -3300,6 +3300,10 @@ function enterScene(idx){
   sceneFormed = false;
   gyroYawOffset = null;
   gyroPitchOffset = null;
+  // 重置陀螺仪累积状态：清掉静默期标记 + 累积 yaw 归零（新场景从前方开始）
+  if(typeof window.__resetGyroCalibration === 'function'){
+    window.__resetGyroCalibration();
+  }
   arBlend = 0;
   camYaw = 0;
   smoothYaw = PANO_YAW_OFFSET;
@@ -4053,28 +4057,25 @@ function setupGyro(){
   }
 }
 /* ================================================================
- *  陀螺仪灵敏度曲线（B 方案：保守，避免天旋地转）
- *  - Yaw 灵敏度 0.5×（手机转 30° → 画面转 15°）
- *  - Pitch 范围 ±20°（够看到主体上下，不会越界绕到天/地）
- *  - 死区 2°（手抖纹丝不动）
- *  - 多帧平均校准 offset（前 0.4s 求平均，治"进场猛转"）
- *  - smoothYaw 走最短角度路径（治 359°↔1° 边界跨越的猛转）
+ *  陀螺仪：增量累积模式（支持 360° 全景旋转）+ 单帧角速度钳制（防猛转）
+ *  - Yaw：累积每一帧 delta_alpha，画面可无限转一圈到背后
+ *  - Yaw 灵敏度 1.0×（1:1 跟随，足够灵敏但不眩晕，靠钳制兜底）
+ *  - 单帧最大角速度 8°（一帧 16ms 转超过 8° 就钳制 → 永不猛转）
+ *  - Pitch：绝对偏移模式（保留 ±25° 限位，防天旋地转）
+ *  - 进场 200ms 静默期（让 alpha 序列稳下来才开始累积，治进场跳变）
+ *  - alpha 跨 0/360 边界自动取最短路径
  * ================================================================ */
-// 死区（弧度，约 2°）：偏移小于这个值视为静止
-const GYRO_DEADZONE = Math.PI / 180 * 2.0;
-// Yaw 灵敏度（B 方案：0.5×）
-const GYRO_YAW_SENSITIVITY = 0.5;
-// Pitch 范围 ±20°
-const GYRO_PITCH_LIMIT = Math.PI / 180 * 20;
-// Offset 校准窗口期（毫秒）：前 N ms 用均值锁基准，期间不动画面
-const GYRO_CALIBRATION_MS = 400;
+const GYRO_YAW_SENSITIVITY    = 1.0;                // yaw 1:1 增量
+const GYRO_PITCH_SENSITIVITY  = 0.7;                // pitch 略软
+const GYRO_PITCH_LIMIT        = Math.PI / 180 * 25; // pitch ±25°
+const GYRO_MAX_DELTA_PER_FRAME= Math.PI / 180 * 8;  // 单帧最多转 8° → 钳制猛转
+const GYRO_DEADZONE           = Math.PI / 180 * 0.3;// 0.3° 死区，治静止抖动
+const GYRO_SETTLE_MS          = 200;                // 进场静默期：丢弃前 200ms 事件
 
-// Offset 校准状态
-let _gyroCalibStartTime = 0;
-let _gyroCalibAlphaSum = 0;
-let _gyroCalibBetaSum  = 0;
-let _gyroCalibCount    = 0;
-let _gyroCalibrated    = false;
+// 累积状态
+let _gyroLastAlpha    = null;   // 上一帧 alpha（度），用于算 delta
+let _gyroSettleStart  = 0;      // 静默期起点
+let _gyroSettled      = false;  // 静默期是否结束
 
 function onDeviceOrientation(e){
   // alpha 可能为 null（某些 Android 浏览器或 iframe 嵌入场景）
@@ -4086,55 +4087,58 @@ function onDeviceOrientation(e){
   const a = alphaSource;
   const b = e.beta || 0;
 
-  // —— 第一阶段：多帧采样平均，锁定基准 offset（前 400ms 不输出 yaw/pitch）——
-  if(!_gyroCalibrated){
-    if(_gyroCalibStartTime === 0) _gyroCalibStartTime = performance.now();
-    _gyroCalibAlphaSum += a;
-    _gyroCalibBetaSum  += b;
-    _gyroCalibCount    += 1;
-    if(performance.now() - _gyroCalibStartTime >= GYRO_CALIBRATION_MS){
-      gyroYawOffset   = _gyroCalibAlphaSum / _gyroCalibCount;
-      gyroPitchOffset = _gyroCalibBetaSum  / _gyroCalibCount;
-      _gyroCalibrated = true;
-      console.log('[gyro] 校准完成: yawOffset=', gyroYawOffset.toFixed(2),
-        ' pitchOffset=', gyroPitchOffset.toFixed(2),
-        ' samples=', _gyroCalibCount);
-    } else {
-      return;  // 校准期内不更新画面，避免猛转
+  // —— 进场静默期：前 200ms 丢弃所有事件，只记录最后一个 alpha 作为基准 ——
+  if(!_gyroSettled){
+    if(_gyroSettleStart === 0) _gyroSettleStart = performance.now();
+    _gyroLastAlpha = a;          // 持续刷新，最后一次的值就是基准
+    if(performance.now() - _gyroSettleStart >= GYRO_SETTLE_MS){
+      _gyroSettled = true;
+      gyroPitchOffset = b;       // pitch 用 settle 结束时的 beta 作零点
+      console.log('[gyro] settle 完成, alpha 基准=', a.toFixed(2),
+                  ' pitch 基准=', b.toFixed(2));
     }
+    return;  // 静默期画面完全不动
   }
 
-  // —— Yaw（alpha）：左右转动，应用 0.5× 灵敏度 + 死区 ——
-  let yawRaw = (a - gyroYawOffset) * Math.PI / 180;
-  // 矫正 0/360 边界：取最短路径
-  while(yawRaw > Math.PI)  yawRaw -= 2*Math.PI;
-  while(yawRaw < -Math.PI) yawRaw += 2*Math.PI;
-  // 死区：小于阈值视为静止
-  if(Math.abs(yawRaw) < GYRO_DEADZONE) yawRaw = 0;
-  // 应用 0.5× 灵敏度
-  const yawScaled = yawRaw * GYRO_YAW_SENSITIVITY;
-  const newGyroYaw = -yawScaled;
+  // —— Yaw：增量累积 + 跨边界最短路径 + 单帧角速度钳制 ——
+  let dAlphaDeg = a - _gyroLastAlpha;
+  // 跨 0/360 边界取最短路径（359 → 1 应当是 +2 而不是 -358）
+  if(dAlphaDeg > 180)  dAlphaDeg -= 360;
+  if(dAlphaDeg < -180) dAlphaDeg += 360;
+  _gyroLastAlpha = a;
+
+  let dYaw = dAlphaDeg * Math.PI / 180 * GYRO_YAW_SENSITIVITY;
+  // 死区：极微小抖动直接吃掉
+  if(Math.abs(dYaw) < GYRO_DEADZONE) dYaw = 0;
+  // ★ 关键：单帧角速度钳制，无论原因（事件队列堆积/jolt/异常跳变）都治
+  if(dYaw >  GYRO_MAX_DELTA_PER_FRAME) dYaw =  GYRO_MAX_DELTA_PER_FRAME;
+  if(dYaw < -GYRO_MAX_DELTA_PER_FRAME) dYaw = -GYRO_MAX_DELTA_PER_FRAME;
+
+  // 累加到 gyroYaw（手机转向左 → 画面也向左转，所以是 -dYaw）
+  const newGyroYaw = gyroYaw - dYaw;
+
   // 检测显著变化 → 视为用户主动操作
-  if(Math.abs(newGyroYaw - gyroYaw) > 0.01){
+  if(Math.abs(dYaw) > 0.005){
     if(autoRotateActive) autoRotateActive = false;
     _lastUserInteractTime = performance.now();
   }
   gyroYaw = newGyroYaw;
 
-  // —— Pitch（beta）：前后倾斜 ±20° + 死区 ——
-  let pitchRaw = (b - gyroPitchOffset) * Math.PI / 180;
+  // —— Pitch（beta）：绝对偏移 + 限位 + 死区（pitch 不需要累积，物理上本来就有限位）——
+  let pitchRaw = (b - gyroPitchOffset) * Math.PI / 180 * GYRO_PITCH_SENSITIVITY;
   if(Math.abs(pitchRaw) < GYRO_DEADZONE) pitchRaw = 0;
   pitchRaw = Math.max(-GYRO_PITCH_LIMIT, Math.min(GYRO_PITCH_LIMIT, pitchRaw));
   gyroPitch = -pitchRaw;
 }
 
-// 校准状态重置：在 enterScene 那里 gyroYawOffset = null 时也要清掉这些
+// 校准状态重置：每次 enterScene 都要清掉，否则跨场景会带着旧状态进场
 window.__resetGyroCalibration = function(){
-  _gyroCalibStartTime = 0;
-  _gyroCalibAlphaSum  = 0;
-  _gyroCalibBetaSum   = 0;
-  _gyroCalibCount     = 0;
-  _gyroCalibrated     = false;
+  _gyroLastAlpha   = null;
+  _gyroSettleStart = 0;
+  _gyroSettled     = false;
+  gyroYaw          = 0;     // 画面 yaw 归零（新场景从前方开始）
+  gyroPitch        = 0;
+  gyroPitchOffset  = null;
 };
 setupGyro();
 
