@@ -4128,7 +4128,9 @@ function onDeviceOrientation(e){
   let pitchRaw = (b - gyroPitchOffset) * Math.PI / 180 * GYRO_PITCH_SENSITIVITY;
   if(Math.abs(pitchRaw) < GYRO_DEADZONE) pitchRaw = 0;
   pitchRaw = Math.max(-GYRO_PITCH_LIMIT, Math.min(GYRO_PITCH_LIMIT, pitchRaw));
-  gyroPitch = -pitchRaw;
+  // 经实测：lookY = sin(smoothPitch)*100，pitch 正→看上方
+  // 用户仰头看天花板 → 期望 lookY 正 → pitchRaw 直接传入（不取负）
+  gyroPitch = pitchRaw;
 }
 
 // 校准状态重置：每次 enterScene 都要清掉，否则跨场景会带着旧状态进场
