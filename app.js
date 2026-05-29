@@ -4053,59 +4053,89 @@ function setupGyro(){
   }
 }
 /* ================================================================
- *  陀螺仪灵敏度曲线：小动作压制 + 大动作放开
- *  目标：手机静止时画面纹丝不动（治"飘"），转头时自然跟随，转身时完整 360°
+ *  陀螺仪灵敏度曲线（B 方案：保守，避免天旋地转）
+ *  - Yaw 灵敏度 0.5×（手机转 30° → 画面转 15°）
+ *  - Pitch 范围 ±20°（够看到主体上下，不会越界绕到天/地）
+ *  - 死区 2°（手抖纹丝不动）
+ *  - 多帧平均校准 offset（前 0.4s 求平均，治"进场猛转"）
+ *  - smoothYaw 走最短角度路径（治 359°↔1° 边界跨越的猛转）
  * ================================================================ */
-// 死区（弧度，约 1°）：偏移小于这个值视为静止，画面完全不动
-const GYRO_DEADZONE = Math.PI / 180 * 1.0;
-// 指数曲线：input^GYRO_CURVE_POW * sign，<5° 几乎不动，>30° 接近 1:1
-const GYRO_CURVE_POW = 1.6;
-// Pitch（前后）允许范围：±60°，能完整仰头看吊顶/低头看地板
-const GYRO_PITCH_LIMIT = Math.PI / 3;  // 60°
-function applyGyroCurve(rawRad){
-  const sign = rawRad >= 0 ? 1 : -1;
-  const absR = Math.abs(rawRad);
-  if(absR < GYRO_DEADZONE) return 0;            // 死区：完全静止
-  // 死区外：把 [死区, π] 映射到 [0, 1]，做指数曲线，再映射回 [0, π]
-  const t = (absR - GYRO_DEADZONE) / (Math.PI - GYRO_DEADZONE);
-  const curved = Math.pow(t, GYRO_CURVE_POW);   // 小动作被压扁，大动作保留
-  return sign * curved * Math.PI;
-}
+// 死区（弧度，约 2°）：偏移小于这个值视为静止
+const GYRO_DEADZONE = Math.PI / 180 * 2.0;
+// Yaw 灵敏度（B 方案：0.5×）
+const GYRO_YAW_SENSITIVITY = 0.5;
+// Pitch 范围 ±20°
+const GYRO_PITCH_LIMIT = Math.PI / 180 * 20;
+// Offset 校准窗口期（毫秒）：前 N ms 用均值锁基准，期间不动画面
+const GYRO_CALIBRATION_MS = 400;
+
+// Offset 校准状态
+let _gyroCalibStartTime = 0;
+let _gyroCalibAlphaSum = 0;
+let _gyroCalibBetaSum  = 0;
+let _gyroCalibCount    = 0;
+let _gyroCalibrated    = false;
 
 function onDeviceOrientation(e){
-  // alpha 可能为 null（某些 Android 浏览器或 iframe 嵌入场景），
-  // 此时降级用 gamma（左右旋转角，左右倾时变化）作为 yaw 来源
+  // alpha 可能为 null（某些 Android 浏览器或 iframe 嵌入场景）
   let alphaSource = e.alpha;
   if(alphaSource === null || alphaSource === undefined){
-    // 降级：用 gamma 当 yaw（gamma 范围 -90~90，左右倾斜手机时变化）
     if(e.gamma === null || e.gamma === undefined) return;
-    alphaSource = e.gamma * 2; // 放大灵敏度
+    alphaSource = e.gamma * 2;
   }
-  // —— Yaw（alpha）：左右转动，无范围限制（完整 360°）——
   const a = alphaSource;
-  if(gyroYawOffset === null) gyroYawOffset = a;
+  const b = e.beta || 0;
+
+  // —— 第一阶段：多帧采样平均，锁定基准 offset（前 400ms 不输出 yaw/pitch）——
+  if(!_gyroCalibrated){
+    if(_gyroCalibStartTime === 0) _gyroCalibStartTime = performance.now();
+    _gyroCalibAlphaSum += a;
+    _gyroCalibBetaSum  += b;
+    _gyroCalibCount    += 1;
+    if(performance.now() - _gyroCalibStartTime >= GYRO_CALIBRATION_MS){
+      gyroYawOffset   = _gyroCalibAlphaSum / _gyroCalibCount;
+      gyroPitchOffset = _gyroCalibBetaSum  / _gyroCalibCount;
+      _gyroCalibrated = true;
+      console.log('[gyro] 校准完成: yawOffset=', gyroYawOffset.toFixed(2),
+        ' pitchOffset=', gyroPitchOffset.toFixed(2),
+        ' samples=', _gyroCalibCount);
+    } else {
+      return;  // 校准期内不更新画面，避免猛转
+    }
+  }
+
+  // —— Yaw（alpha）：左右转动，应用 0.5× 灵敏度 + 死区 ——
   let yawRaw = (a - gyroYawOffset) * Math.PI / 180;
-  while(yawRaw > Math.PI) yawRaw -= 2*Math.PI;
+  // 矫正 0/360 边界：取最短路径
+  while(yawRaw > Math.PI)  yawRaw -= 2*Math.PI;
   while(yawRaw < -Math.PI) yawRaw += 2*Math.PI;
-  const yawCurved = applyGyroCurve(yawRaw);     // 指数曲线 + 死区
-  const newGyroYaw = -yawCurved;
-  // 检测陀螺仪显著变化 → 视为用户主动操作，关闭自动旋转 + 刷新静止计时
+  // 死区：小于阈值视为静止
+  if(Math.abs(yawRaw) < GYRO_DEADZONE) yawRaw = 0;
+  // 应用 0.5× 灵敏度
+  const yawScaled = yawRaw * GYRO_YAW_SENSITIVITY;
+  const newGyroYaw = -yawScaled;
+  // 检测显著变化 → 视为用户主动操作
   if(Math.abs(newGyroYaw - gyroYaw) > 0.01){
     if(autoRotateActive) autoRotateActive = false;
     _lastUserInteractTime = performance.now();
   }
   gyroYaw = newGyroYaw;
 
-  // —— Pitch（beta）：前后倾斜，±60° 完整开放 ——
-  // beta: 0=平放, 90=竖直, 负值=向后仰
-  const b = e.beta || 0;
-  if(gyroPitchOffset === null) gyroPitchOffset = b;
+  // —— Pitch（beta）：前后倾斜 ±20° + 死区 ——
   let pitchRaw = (b - gyroPitchOffset) * Math.PI / 180;
-  // 死区 + 限幅（不做指数曲线：pitch 范围本来就小，曲线会让仰头特别累）
   if(Math.abs(pitchRaw) < GYRO_DEADZONE) pitchRaw = 0;
   pitchRaw = Math.max(-GYRO_PITCH_LIMIT, Math.min(GYRO_PITCH_LIMIT, pitchRaw));
   gyroPitch = -pitchRaw;
 }
+
+// 校准状态重置：在 enterScene 那里 gyroYawOffset = null 时也要清掉这些
+window.__resetGyroCalibration = function(){
+  _gyroCalibStartTime = 0;
+  _gyroCalibAlphaSum  = 0;
+  _gyroCalibBetaSum   = 0;
+  _gyroCalibCount     = 0;
+  _gyroCalibrated     = false;
+};
 setupGyro();
 
 createCoordLabels();
