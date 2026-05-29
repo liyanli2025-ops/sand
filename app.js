@@ -4066,8 +4066,8 @@ function setupGyro(){
  *  - alpha 跨 0/360 边界自动取最短路径
  * ================================================================ */
 const GYRO_YAW_SENSITIVITY    = 1.0;                // yaw 1:1 增量
-const GYRO_PITCH_SENSITIVITY  = 0.7;                // pitch 略软
-const GYRO_PITCH_LIMIT        = Math.PI / 180 * 25; // pitch ±25°
+const GYRO_PITCH_SENSITIVITY  = 1.0;                // pitch 1:1（让全景上下都能看到）
+const GYRO_PITCH_LIMIT        = Math.PI / 180 * 50; // pitch ±50°（够看天花板/地面）
 const GYRO_MAX_DELTA_PER_FRAME= Math.PI / 180 * 8;  // 单帧最多转 8° → 钳制猛转
 const GYRO_DEADZONE           = Math.PI / 180 * 0.3;// 0.3° 死区，治静止抖动
 const GYRO_SETTLE_MS          = 200;                // 进场静默期：丢弃前 200ms 事件
@@ -4378,13 +4378,19 @@ function tick(){
         camera.position.z = -Math.cos(smoothYaw) * orbitR;
         camera.lookAt(0, 0, 0);
       } else if(_isDirPanoMode){
-        // 子场景全景图：相机贴近球心，平视赤道线（lookY=0），消除仰角偏移
-        const orbitR = 0.1;  // 极小值，相机几乎在球心，让全景图视觉上"无限远"
-        camera.position.x = -Math.sin(smoothYaw) * orbitR;
-        camera.position.y = 0 + smoothPitch * 30;
-        camera.position.z = -Math.cos(smoothYaw) * orbitR;
-        camera.lookAt(-Math.sin(smoothYaw) * 100, 0, -Math.cos(smoothYaw) * 100);
+        // 子场景全景图：相机在球心，朝着 yaw+pitch 方向看 —— 真正的 360° 全景
+        // pitch 影响 lookAt 目标点的 Y（仰角），不再硬编码为 0
+        const lookDist = 100;
+        const lookY = Math.sin(smoothPitch) * lookDist;
+        const horiz = Math.cos(smoothPitch) * lookDist;  // 水平面分量（仰角越大，水平面分量越小）
+        camera.position.set(0, 0, 0);
+        camera.lookAt(
+          -Math.sin(smoothYaw) * horiz,
+          lookY,
+          -Math.cos(smoothYaw) * horiz
+        );
       } else {
+        // 主场景（玫瑰宫等实体模型轨道）：保持原逻辑
         const sc = computeSceneCamera();
         const orbitR = sc.z;
         camera.position.x = -Math.sin(smoothYaw) * orbitR;
