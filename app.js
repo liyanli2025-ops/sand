@@ -967,6 +967,7 @@ const sparklePos = new Float32Array(SPARKLE_COUNT * 3);
 const sparkleDir = new Float32Array(SPARKLE_COUNT * 3);
 const sparkleSeed = new Float32Array(SPARKLE_COUNT);
 const sparkleSize = new Float32Array(SPARKLE_COUNT);
+const sparkleIsBase = new Float32Array(SPARKLE_COUNT);  // 1=BASE 层（含星芒大颗），0=DENSE 加密层（仅细小点）
 
 for(let i = 0; i < SPARKLE_COUNT; i++){
   const u = Math.random(), v = Math.random();
@@ -988,12 +989,14 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
   sparkleSeed[i] = Math.random() * 100;
 
   if(i < SPARKLE_BASE){
+    sparkleIsBase[i] = 1.0;  // BASE 层
     // 前 480 颗：层次配比（大颗大幅缩减，避免运动时一堆十字大花显假）
     const r = Math.random();
     if(r < 0.08)      sparkleSize[i] = 14 + Math.random() * 8;    // 大颗（8% / 14~22，原 22% / 22~34）
     else if(r < 0.45) sparkleSize[i] = 10 + Math.random() * 6;    // 中颗（37% / 10~16）
     else              sparkleSize[i] = 5 + Math.random() * 5;     // 小颗（55% / 5~10）
   } else {
+    sparkleIsBase[i] = 0.0;  // DENSE 加密层（细小点）
     // 后 8000 颗：小颗加密层（5~12 范围）
     // 球壳半径 900，距离衰减 300/900≈0.33，size 5~12 → 屏幕上 1.6~4px
     // 之前 2~6 会被 max(1.5) 卡死全锁 1.5px → 加密肉眼几乎不可见
@@ -1005,6 +1008,7 @@ sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
 sparkleGeo.setAttribute('aDir',     new THREE.BufferAttribute(sparkleDir, 3));
 sparkleGeo.setAttribute('aSeed',    new THREE.BufferAttribute(sparkleSeed, 1));
 sparkleGeo.setAttribute('aSize',    new THREE.BufferAttribute(sparkleSize, 1));
+sparkleGeo.setAttribute('aIsBase',  new THREE.BufferAttribute(sparkleIsBase, 1));
 
 const sparkleMat = new THREE.ShaderMaterial({
   uniforms: {
@@ -1012,14 +1016,17 @@ const sparkleMat = new THREE.ShaderMaterial({
     uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
     uOpacity:    { value: 0 },
     uMotion:     { value: 0 },  // 0=静止, 1=快速转动
+    uDenseOnly:  { value: 0 },  // 0=BASE+DENSE 全开（玫瑰宫），1=只显示 DENSE 5000 颗细小点（镜中圣陵）
   },
   vertexShader: `
     attribute vec3 aDir;
     attribute float aSeed;
     attribute float aSize;
+    attribute float aIsBase;
     uniform float uTime;
     uniform float uPixelRatio;
     uniform float uMotion;
+    uniform float uDenseOnly;
     varying float vAlpha;
     varying float vFlash;
     void main(){
@@ -1028,6 +1035,9 @@ const sparkleMat = new THREE.ShaderMaterial({
       vec3 toCamView = normalize(-mvPos.xyz);
       float facing = clamp(dot(dirView, toCamView) * 0.5 + 0.5, 0.0, 1.0);
       facing = pow(facing, 1.4);
+
+      // DenseOnly 模式：BASE 层（含大颗星芒）整体隐藏 → size=0 顶点被裁剪
+      float visibleScale = mix(1.0, 1.0 - aIsBase, uDenseOnly);
 
       // 慢速基础闪烁（每颗节奏不同）—— 频率更快 + 振幅更大
       float twinkle = 0.45 + 0.55 * sin(uTime * 2.6 + aSeed * 6.2831);
@@ -1044,14 +1054,15 @@ const sparkleMat = new THREE.ShaderMaterial({
       // 总亮度 = facing * twinkle * 运动强度
       // 静止时给一个微弱基底（0.08），让光点"任何时候都在闪"
       float intensity = 0.08 + 0.92 * uMotion;
-      vAlpha = facing * twinkle * intensity;
+      vAlpha = facing * twinkle * intensity * visibleScale;
 
       // 闪光瞬间放大颗粒（仅运动时）—— 放大幅度从 ×1.3 收敛到 ×0.7
       // 避免运动时大颗"爆开"成屏幕上的大十字花（显假）
       float sizeBoost = 1.0 + vFlash * 0.7;
-      gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0));
+      gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0)) * visibleScale;
       // 最小尺寸下调到 1.5px：让加密的小颗保持"细密针尖感"，不被强制放大
-      gl_PointSize = max(gl_PointSize, 1.5);
+      // visibleScale=0 时不应用最小值，让被屏蔽的颗粒彻底消失
+      gl_PointSize = mix(0.0, max(gl_PointSize, 1.5), step(0.5, visibleScale));
       gl_Position = projectionMatrix * mvPos;
     }
   `,

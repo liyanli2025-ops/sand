@@ -732,9 +732,24 @@ function openDirectoryOverlay(idx){
   _dirSwitchingScene = true;
   _dirCurrentSceneIdx = idx;
 
-  /* 进入任何子场景全景图：关闭闪光点（仅镜宫才有水晶反光） */
+  /* 进入子场景全景图：sparkle 控制
+   * - shrine（镜中圣陵 · 镜面镶嵌）：启用 5000 颗细小反光点（DenseOnly 模式）
+   * - 其他子场景：关闭闪光点
+   */
   if(typeof sparkleGroup !== 'undefined' && sparkleGroup){
-    sparkleGroup.visible = false;
+    if(cfg.key === 'shrine'){
+      sparkleGroup.visible = true;
+      // 启用 DenseOnly 模式：只渲染 5000 颗 DENSE 加密层，隐藏 480 颗 BASE 大颗 + 星芒
+      if(typeof sparkleMat !== 'undefined' && sparkleMat.uniforms.uDenseOnly){
+        sparkleMat.uniforms.uDenseOnly.value = 1;
+      }
+      // 同时隐藏 flareSprites（八角星芒贴图，水晶专属，不适合镜面）
+      if(typeof flareSprites !== 'undefined'){
+        for(const spr of flareSprites) spr.visible = false;
+      }
+    } else {
+      sparkleGroup.visible = false;
+    }
   }
 
   /* 进入子场景：隐藏碎片地图（碎片仅在镜宫显示） */
@@ -864,6 +879,13 @@ function closeDirectoryOverlay(){
         if(_dirGroup) _dirGroup.visible = true;
         if(typeof sparkleGroup !== 'undefined' && sparkleGroup){
           sparkleGroup.visible = true;
+          // 恢复 BASE+DENSE 全开（玫瑰宫的水晶反光含大颗星芒）
+          if(typeof sparkleMat !== 'undefined' && sparkleMat.uniforms.uDenseOnly){
+            sparkleMat.uniforms.uDenseOnly.value = 0;
+          }
+          if(typeof flareSprites !== 'undefined'){
+            for(const spr of flareSprites) spr.visible = true;
+          }
         }
         // 恢复吊灯爆炸碎片显示
         if(typeof shardInstMeshes !== 'undefined' && shardInstMeshes && shardInstMeshes[0] && shardInstMeshes[0].inst){
@@ -875,6 +897,12 @@ function closeDirectoryOverlay(){
       if(_dirGroup) _dirGroup.visible = true;
       if(typeof sparkleGroup !== 'undefined' && sparkleGroup){
         sparkleGroup.visible = true;
+        if(typeof sparkleMat !== 'undefined' && sparkleMat.uniforms.uDenseOnly){
+          sparkleMat.uniforms.uDenseOnly.value = 0;
+        }
+        if(typeof flareSprites !== 'undefined'){
+          for(const spr of flareSprites) spr.visible = true;
+        }
       }
       if(_dirHintEl && !allDone) _dirHintEl.classList.add('show');
     }
