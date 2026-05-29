@@ -7,3 +7,4 @@ Thumbs.db
 .codebuddy/
 # 原始未压缩 GLB（144MB，不提交到 Git）
 setar__persian_musical_instrument.glb
+assets/_pano_backup/
