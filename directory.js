@@ -1100,10 +1100,26 @@ function ensureDirectoryDom(){
       +   '</div>'
       + '</div>';
     document.body.appendChild(_dirOverlayEl);
-    _dirOverlayEl.querySelector('.dir-overlay-bg').addEventListener('click', closeDirectoryOverlay);
-    _dirOverlayEl.querySelector('.dir-overlay-close').addEventListener('click', collapseDirectoryCard);
-    _dirOverlayEl.querySelector('.dir-mini-close').addEventListener('click', closeDirectoryOverlay);
-    _dirOverlayEl.querySelector('.dir-mini-expand').addEventListener('click', expandDirectoryCard);
+    /* —— 所有浮层按钮：在 pointerdown/pointerup 阶段 stopPropagation，
+     *   防止冒泡到 window 上的 raycaster 监听器（pointerup capture 那条已加 closest 兜底，
+     *   但 stopPropagation 是更早一层防御）。 */
+    var _stopPtr = (el) => {
+      if(!el) return;
+      el.addEventListener('pointerdown', (e) => e.stopPropagation());
+      el.addEventListener('pointerup',   (e) => e.stopPropagation());
+    };
+    var _bgEl = _dirOverlayEl.querySelector('.dir-overlay-bg');
+    var _closeEl = _dirOverlayEl.querySelector('.dir-overlay-close');
+    var _miniCloseEl = _dirOverlayEl.querySelector('.dir-mini-close');
+    var _expandEl = _dirOverlayEl.querySelector('.dir-mini-expand');
+    _bgEl.addEventListener('click', closeDirectoryOverlay);
+    _closeEl.addEventListener('click', collapseDirectoryCard);
+    _miniCloseEl.addEventListener('click', closeDirectoryOverlay);
+    _expandEl.addEventListener('click', expandDirectoryCard);
+    _stopPtr(_bgEl);
+    _stopPtr(_closeEl);
+    _stopPtr(_miniCloseEl);
+    _stopPtr(_expandEl);
     /* —— 长文案底部"↑ 收起"：点击直接折回短文案（mini 卡），不关闭整层 —— */
     var _footerEl = _dirOverlayEl.querySelector('.dir-overlay-footer');
     if(_footerEl){
@@ -1114,12 +1130,14 @@ function ensureDirectoryDom(){
           collapseDirectoryCard();
         }
       });
+      _stopPtr(_footerEl);
     }
     // 图标也可点击 → 跳转长文案（与"查看碎片故事"按钮等价）
     var _miniIconEl = _dirOverlayEl.querySelector('.dir-mini-icon');
     if(_miniIconEl){
       _miniIconEl.style.cursor = 'pointer';
       _miniIconEl.addEventListener('click', expandDirectoryCard);
+      _stopPtr(_miniIconEl);
     }
   }
 }
@@ -1672,6 +1690,18 @@ window.addEventListener('pointerup', (e) => {
   if(!mdlG || !mdlG._collapsePaused || !_dirInited) return;
   if(!_dirBigShards.length) return;
   if(_dirSwitchingScene) return;
+
+  /* —— BUG 修复 2026-06-02：浮层内（mini 卡 / 长文案 / × / footer "↑收起" 等）的点击
+   *   绝不能触发 raycaster 跳转。pointerup 是 window capture 阶段最先收到，
+   *   即使 footer/按钮自己 stopPropagation 也来不及（capture 比 bubble 早）。
+   *   这里直接看 e.target 的 DOM 链：只要属于 #dirOverlay 子树就 return。
+   *   现象：在长文案点 "↑收起" 后立刻被 raycaster 命中下一个未访问 sprite，
+   *        被错跳到下一个场景。 */
+  if(e.target && typeof e.target.closest === 'function'){
+    if(e.target.closest('.dir-overlay, #dirOverlay, #fragmentDeck, #finale, #finalePrelude')){
+      return;
+    }
+  }
 
   if(_dirPointerDownPos){
     const dx = e.clientX - _dirPointerDownPos.x;
