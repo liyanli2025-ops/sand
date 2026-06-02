@@ -1,4 +1,4 @@
-/* sand v2.2 mini-card revamp 2026-06-02T19:50 — long-text scroll-top + footer collapse-btn */
+/* sand v2.2 mini-card revamp 2026-06-02T20:08 — finale credits-roll + logo + share cue + gyro pass-through */
 /* 方正丝路体 简繁 ExtraBold（subset：45 字符，~11KB）
    仅用于碎片标签 / 「轻触吊灯」等核心标题级文字 */
 @font-face{
@@ -1813,7 +1813,14 @@ body.dir-detail-open .story-card{
 }
 .finale.show{
   opacity:1;
-  pointer-events:auto;
+  /* 关键：finale 自身不拦截 pointer 事件，让背景 stage 仍可被手指拖动 +
+     陀螺仪转视角（陀螺仪是 window 监听不受 pointer-events 影响，但拖拽要求
+     事件能穿透到 #stage）。
+     文字层用 .finale-content 也保持 pointer-events:none；分享提示同样 none。 */
+  pointer-events:none;
+}
+.finale.show .finale-content{
+  pointer-events:none;
 }
 /* 进入终幕后强制屏蔽所有其他 UI（保留 #stage 让烧灼+碎片作为星空） */
 body.finale-on .scene-bg,
@@ -1849,17 +1856,33 @@ body.finale-on #dirOverlay{
 .finale-content{
   position:absolute;
   inset:0;
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  justify-content:flex-start;
-  padding:8vh 7vw 12vh;
-  box-sizing:border-box;
-  overflow-y:auto;
-  -webkit-overflow-scrolling:touch;
+  /* 视口容器：内部用 .finale-roll 做 transform 滚动；不再用 overflow-y:auto，
+     避免片尾向上滚动被用户手指误触动。 */
+  overflow:hidden;
   color:#f3e3c2;
   font-family: "Noto Serif SC", "Songti SC", "STSong", "PingFang SC", serif;
   text-shadow:0 0 22px rgba(0,0,0,0.85), 0 2px 8px rgba(0,0,0,0.6);
+}
+/* —— 片尾滚动轨道：translateY 缓慢上推，电视剧片尾风格 —— */
+.finale-roll{
+  position:absolute;
+  left:50%;
+  top:0;
+  transform:translate(-50%, 0);
+  width:100%;
+  max-width:680px;
+  padding:16vh 7vw 4vh;
+  box-sizing:border-box;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  /* 默认无滚动；.rolling 时启用 transition 把 translateY(-) --roll-distance */
+  --roll-distance: 0px;
+  will-change:transform;
+}
+.finale.rolling .finale-roll{
+  transform:translate(-50%, calc(0px - var(--roll-distance, 0px)));
+  transition:transform 32s linear;
 }
 .finale-block{
   width:100%; max-width:560px;
@@ -1875,16 +1898,77 @@ body.finale-on #dirOverlay{
 .finale-block p{
   margin:0 0 14px;
   font-size:16px;
-  line-height:1.9;
+  line-height:1.95;
   letter-spacing:0.6px;
   color:#f3e3c2;
 }
 .finale-block p.quiet{
-  color:rgba(243,227,194,0.7);
+  color:rgba(243,227,194,0.72);
   font-style:italic;
   font-size:15px;
 }
-.finale-block-1{ margin-top:18vh; }
+.finale-block-1{ margin-top:6vh; }
+/* —— 落版：标题 logo（替代旧 finale-end 标题文字） —— */
+.finale-end-logo{
+  width:100%;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  margin:60px 0 30vh; /* 上方与第三段拉开距离；下方留白让滚到视口中央能停住 */
+  opacity:0;
+  transition:opacity 2s ease 0.6s;
+}
+.finale.rolling .finale-end-logo{
+  opacity:1;
+}
+.finale-logo-img{
+  display:block;
+  /* 与 splash-logo 同体系：PC 端最大 560px，移动端 80vw */
+  width:min(80vw, 560px);
+  height:auto;
+  object-fit:contain;
+  filter:drop-shadow(0 0 30px rgba(245,204,122,0.18))
+         drop-shadow(0 4px 18px rgba(0,0,0,0.6));
+}
+/* —— 右上角分享指引：滚动到底后显示 —— */
+.finale-share-cue{
+  position:absolute;
+  top:18px;
+  right:18px;
+  z-index:3;
+  pointer-events:none;
+  opacity:0;
+  transform:translateY(-6px);
+  transition:opacity 1.2s ease, transform 1.2s ease;
+  text-align:right;
+  /* 默认隐藏；.rolled-end 后渐入 */
+}
+.finale.rolled-end .finale-share-cue{
+  opacity:1;
+  transform:translateY(0);
+}
+.finale-share-arrow{
+  display:block;
+  width:74px;
+  height:56px;
+  margin-left:auto;
+  /* 轻微呼吸感，吸引注意 */
+  animation:finaleArrowBreathe 2.4s ease-in-out infinite;
+}
+@keyframes finaleArrowBreathe{
+  0%,100%{ opacity:0.85; transform:translateY(0); }
+  50%{ opacity:1; transform:translateY(-2px); }
+}
+.finale-share-text{
+  margin-top:4px;
+  font-size:13px;
+  letter-spacing:1.5px;
+  color:rgba(245,204,122,0.92);
+  font-family: "Noto Serif SC", "Songti SC", "STSong", "PingFang SC", serif;
+  text-shadow:0 0 10px rgba(0,0,0,0.7);
+}
+
+/* 旧 .finale-end / 标题文字相关样式保留以防其它地方引用，但当前 DOM 不再使用 */
 .finale-end{
   text-align:center;
   border-top:1px solid rgba(240,201,138,0.25);
@@ -1919,11 +2003,16 @@ body.finale-on #dirOverlay{
   font-style:italic;
 }
 @media (max-width:600px){
-  .finale-content{ padding:6vh 6vw 10vh; }
+  .finale-roll{ padding:14vh 6vw 4vh; }
   .finale-block{ margin-bottom:60px; }
-  .finale-block-1{ margin-top:14vh; }
-  .finale-block p{ font-size:18px; line-height:1.85; }
+  .finale-block-1{ margin-top:4vh; }
+  .finale-block p{ font-size:18px; line-height:1.9; }
   .finale-block p.quiet{ font-size:18px; }
+  .finale-end-logo{ margin:50px 0 26vh; }
+  .finale-logo-img{ width:84vw; }
+  .finale-share-cue{ top:14px; right:14px; }
+  .finale-share-arrow{ width:64px; height:48px; }
+  .finale-share-text{ font-size:12px; letter-spacing:1.2px; }
   .finale-title-zh{ font-size:24px; letter-spacing:8px; }
   .finale-title-en{ font-size:18px; letter-spacing:4px; }
 }

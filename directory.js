@@ -1751,31 +1751,60 @@ function showFinale(){
   if(!el){
     el = document.createElement('div');
     el.id = 'finale';
-    el.className = 'finale finale-minimal';
+    el.className = 'finale finale-minimal finale-credits';
+    /* 滚动结构：
+     *   .finale-content（视口，不滚）
+     *     .finale-roll（被 translateY 缓慢上推的内容轨道）
+     *       .finale-block × 3
+     *       .finale-end-logo（落版：标题 logo，居中）
+     *   .finale-share-cue（右上角"分享提示"，滚动到底时显示） */
     el.innerHTML = ''
       + '<div class="finale-content">'
-      +   '<div class="finale-block finale-block-1">'
-      +     '<p>镜子碎了，光散成星。</p>'
-      +     '<p class="quiet">那些来自十万片镜面、四千万块瓷砖的反光，</p>'
-      +     '<p class="quiet">如今飘在无边的黑里。</p>'
+      +   '<div class="finale-roll">'
+      +     '<div class="finale-block finale-block-1">'
+      +       '<p>火不会问，砖会不会留下。</p>'
+      +       '<p class="quiet">它只把光给出去，让镜面将它接住。</p>'
+      +       '<p class="quiet">十万片镜面碎了，光便分作十万颗星，</p>'
+      +       '<p class="quiet">飘进无边的黑里，仍亮着，</p>'
+      +       '<p class="quiet">仍是同一束光。</p>'
+      +     '</div>'
+      +     '<div class="finale-block finale-block-2">'
+      +       '<p>文明，是一种向重力的反抗。</p>'
+      +       '<p class="quiet">是有人把瓷砖一块一块铺上拱顶，</p>'
+      +       '<p class="quiet">是母亲牵着女儿的手打下第一只结，</p>'
+      +       '<p class="quiet">是制琴师在午夜调试一根弦，</p>'
+      +       '<p class="quiet">让明天的人，听见今天的回声。</p>'
+      +       '<p>战火来了，把十八年压成一秒，</p>'
+      +       '<p class="quiet">把秩序还原为尘。</p>'
+      +     '</div>'
+      +     '<div class="finale-block finale-block-3">'
+      +       '<p>但尘里还有光。</p>'
+      +       '<p class="quiet">明知一切终将崩塌，仍然选择建造，</p>'
+      +       '<p class="quiet">明知碎了还要去聚——</p>'
+      +       '<p>这是人，写给时间的回信。</p>'
+      +       '<p class="quiet">伊朗会在消失。但凡有人记得它如何被造出来，</p>'
+      +       '<p class="quiet">它就还没有真的消失。</p>'
+      +     '</div>'
+      +     '<div class="finale-end-logo">'
+      +       '<img class="finale-logo-img" src="./assets/logo_v2.png" alt="聚不起的沙">'
+      +     '</div>'
       +   '</div>'
-      +   '<div class="finale-block finale-block-2">'
-      +     '<p>文明是一场反熵的运动。</p>'
-      +     '<p>工匠铺设瓷砖，母亲教女儿打结，制琴师调试弦音——</p>'
-      +     '<p class="quiet">是反熵。</p>'
-      +     '<p class="quiet">战争把 18 年压成 1 秒，把秩序还原成尘。</p>'
-      +   '</div>'
-      +   '<div class="finale-block finale-block-3">'
-      +     '<p>但碎片还在发光。</p>'
-      +     '<p class="quiet">明知一切终将崩塌，仍然选择建造，</p>'
-      +     '<p class="quiet">这是人类做过的最伟大的事。</p>'
-      +   '</div>'
-      +   '<div class="finale-block finale-block-4 finale-end">'
-      +     '<div class="finale-title-zh">18 年与 1 秒</div>'
-      +     '<div class="finale-title-en">18 Years and 1 Second</div>'
-      +     '<div class="finale-meta">2026.02.28 — 2026.05.24</div>'
-      +     '<div class="finale-meta quiet">第 86 天 · 距离第 100 天，还有 14 天</div>'
-      +   '</div>'
+      + '</div>'
+      /* —— 右上角"点击分享"指引箭头：滚动到底后才显示 —— */
+      + '<div class="finale-share-cue" aria-hidden="true">'
+      +   '<svg class="finale-share-arrow" viewBox="0 0 80 60">'
+      +     '<defs>'
+      +       '<marker id="finaleArrowHead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
+      +         '<path d="M0,0 L10,5 L0,10 z" fill="rgba(245,204,122,0.9)"/>'
+      +       '</marker>'
+      +     '</defs>'
+      +     /* 一段从左下到右上的弧线，箭头尖端朝向右上"..."所在的位置 */
+      +     '<path d="M10,52 Q40,46 60,18" '
+      +       'stroke="rgba(245,204,122,0.9)" stroke-width="1.4" fill="none" '
+      +       'stroke-linecap="round" stroke-dasharray="3 4" '
+      +       'marker-end="url(#finaleArrowHead)"/>'
+      +   '</svg>'
+      +   '<div class="finale-share-text">点击右上角 ··· 分享</div>'
       + '</div>';
     document.body.appendChild(el);
   }
@@ -1788,13 +1817,67 @@ function showFinale(){
     el.classList.add('show');
   });
 
-  // 分段浮现文案
+  // —— 分段浮现文案：1.8s / 7s / 13s ——
   const blocks = el.querySelectorAll('.finale-block');
-  // 节奏比上一版收紧：5s / 11s / 18s / 28s
-  const schedule = [1800, 7000, 13000, 22000];
+  const schedule = [1800, 7000, 13000];
   blocks.forEach((b, i) => {
     setTimeout(() => b.classList.add('show'), schedule[i] || 0);
   });
+
+  /* —— 13s 第三段开始浮现的同时，启动"片尾向上滚动"——
+   *   滚动距离 = .finale-roll 总高 + 起始 padding，由 CSS 用变量驱动；
+   *   通过 JS 计算实际高度后赋给 --roll-distance，确保不同屏幕都能滚到末尾。 */
+  setTimeout(() => {
+    const rollEl = el.querySelector('.finale-roll');
+    const contentEl = el.querySelector('.finale-content');
+    if(rollEl && contentEl){
+      // 视口可见高 + 内容总高 → 至少需要把内容顶上去 (rollH - vh*0.35)，
+      // 留 35vh 的"尾留白"让 logo 最终居中可见，不一闪而过冲出屏幕。
+      const vh = contentEl.clientHeight;
+      const rollH = rollEl.scrollHeight;
+      // 让 logo 滚到视口竖直中线再略偏上的位置后停住（最终静帧）
+      const distance = Math.max(0, rollH - vh * 0.5);
+      rollEl.style.setProperty('--roll-distance', distance + 'px');
+      el.classList.add('rolling');
+
+      /* 滚动持续时长 = 32 秒（缓慢电视片尾感）。
+       * 滚动结束后显示右上角分享指引（动画 transition end 监听）。 */
+      const onRollEnd = (e) => {
+        if(e.target !== rollEl) return;
+        if(e.propertyName !== 'transform') return;
+        rollEl.removeEventListener('transitionend', onRollEnd);
+        el.classList.add('rolled-end');
+      };
+      rollEl.addEventListener('transitionend', onRollEnd);
+
+      /* 兜底：transitionend 在某些浏览器/被中断时不触发，定时器同步触发 */
+      setTimeout(() => el.classList.add('rolled-end'), 32000 + 200);
+    }
+  }, 13000);
+
+  /* —— 进入 finale 后，再尝试请求一次陀螺仪权限（iOS）——
+   *   有些用户在 splash 阶段权限被默默拒绝（或 splash 异步路径出错没请求成功），
+   *   到 finale 阶段陀螺仪不工作。这里在用户首次触摸 finale 屏幕时再请求一次。 */
+  if(typeof DeviceOrientationEvent !== 'undefined' &&
+     typeof DeviceOrientationEvent.requestPermission === 'function' &&
+     !window.__gyroPermissionGranted){
+    const retryGyro = () => {
+      try{
+        DeviceOrientationEvent.requestPermission().then(state => {
+          if(state === 'granted'){
+            window.__gyroPermissionGranted = true;
+            if(typeof window.__gyroAttachListeners === 'function'){
+              window.__gyroAttachListeners('finale-retry');
+            }
+          }
+        }).catch(()=>{});
+      }catch(_){}
+      el.removeEventListener('touchstart', retryGyro);
+      el.removeEventListener('click', retryGyro);
+    };
+    el.addEventListener('touchstart', retryGyro, { once: true, passive: true });
+    el.addEventListener('click', retryGyro, { once: true });
+  }
 }
 
 /* _startFinaleStars 已移除：sparkle 由主场景烧灼后剩余的反光与暗环境自身呈现 */
