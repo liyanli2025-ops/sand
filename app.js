@@ -105,7 +105,7 @@ function pickParticleCount(){
 const COUNT = pickParticleCount();
 console.log('[perf] 粒子数 COUNT =', COUNT, ' isMobile =', isMobile,
             ' cores =', navigator.hardwareConcurrency, ' mem =', navigator.deviceMemory);
-const AMBIENT_COUNT = isMobile ? 1000 : 1800;
+const AMBIENT_COUNT = isMobile ? 300 : 600;
 
 /* ---------- 通用模型管理：按场景 ID 加载不同 GLB ---------- */
 const _isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -730,17 +730,39 @@ scene.add(panoCrossfadeSphere);
 function _ensurePanoLoaded(url, sceneId){
   return new Promise((resolve, reject) => {
     if(!url){ resolve(null); return; }
+    // 已加载完成：直接 resolve
     if(panoTextures[sceneId] && panoTextures[sceneId] !== 'loading'){
       resolve(panoTextures[sceneId]); return;
     }
+    // 正在加载（被预加载循环或其他调用先占住）：注册回调队列等待
+    if(panoTextures[sceneId] === 'loading'){
+      panoTextures._waiters = panoTextures._waiters || {};
+      const arr = (panoTextures._waiters[sceneId] = panoTextures._waiters[sceneId] || []);
+      arr.push({ resolve, reject });
+      return;
+    }
+    // 首次加载
+    panoTextures[sceneId] = 'loading';
+    panoTextures._waiters = panoTextures._waiters || {};
+    panoTextures._waiters[sceneId] = panoTextures._waiters[sceneId] || [];
     const tex = new THREE.TextureLoader().load(url, (loaded) => {
       loaded.mapping = THREE.EquirectangularReflectionMapping;
       if(typeof THREE.SRGBColorSpace !== 'undefined') loaded.colorSpace = THREE.SRGBColorSpace;
       else if(typeof THREE.sRGBEncoding !== 'undefined') loaded.encoding = THREE.sRGBEncoding;
       panoTextures[sceneId] = loaded;
+      // 唤醒所有等待者
+      const waiters = panoTextures._waiters[sceneId] || [];
+      panoTextures._waiters[sceneId] = [];
       resolve(loaded);
-    }, undefined, (err) => { reject(err); });
-    panoTextures[sceneId] = 'loading';
+      waiters.forEach(w => { try { w.resolve(loaded); } catch(_){} });
+    }, undefined, (err) => {
+      // 出错也要清理等待者，避免后续点击 hang
+      panoTextures[sceneId] = null;
+      const waiters = panoTextures._waiters[sceneId] || [];
+      panoTextures._waiters[sceneId] = [];
+      reject(err);
+      waiters.forEach(w => { try { w.reject(err); } catch(_){} });
+    });
     tex.mapping = THREE.EquirectangularReflectionMapping;
   });
 }
@@ -833,7 +855,10 @@ function transitionMainPanoTo(url, cacheKey, burnInSec, burnOutSec, onComplete){
  *  - callId 每帧检查 —— 旧 tick 检测到失效立即停止，不会写球壳 uniform
  *  - 先加载完 toTex 再启动 tween —— 决不在动画跑到一半换 uTexTo
  * ------------------------------------------------------------------ */
-function transitionMainPanoCrossfade(url, cacheKey, durationSec, onComplete, fovOptions){
+function transitionMainPanoCrossfade(url, cacheKey, durationSec, onComplete, fovOptions, onStart){
+  /* onStart（可选）：在贴图加载完毕、球壳真正可见、火焰开始那一刻同步触发。
+   * 用途：把"相机视角 tween"等需要与火焰同步的副作用挂在这里，
+   * 避免相机 tween 已经开始但贴图还没加载好导致"先转视角才灼烧"的视觉跳变。 */
   durationSec = durationSec || 1.6;
   const durMs = durationSec * 1000;
 
@@ -897,6 +922,11 @@ function transitionMainPanoCrossfade(url, cacheKey, durationSec, onComplete, fov
       }
     }
 
+    // ★ 同步钩子：贴图就绪、球壳已可见的同一帧触发，调用方可在此启动相机 tween 等副作用
+    if(typeof onStart === 'function'){
+      try { onStart(); } catch(err){ console.warn('[pano-crossfade] onStart err:', err); }
+    }
+
     const startTime = performance.now();
     const tick = () => {
       // 被新调用接管：旧 tick 立即放弃（新调用已经把 oldTo 落地到 background）
@@ -958,7 +988,7 @@ scene.add(sparkleGroup);
 //    480 颗"原始组合"（大/中/小都有，奠定富丽堂皇的层次感）
 //    + 5000 颗小颗加密（让画面更细腻闪烁，不增加大颗）
 //    总计 5480 颗：单 drawcall, 不增加 fill rate（小颗 size≈5~12，屏幕 1.6~4px）
-const SPARKLE_BASE = 480;          // 原来的层次组合
+const SPARKLE_BASE = 5000;         // 玫瑰宫水晶反光（十字星芒大量铺满，有大有小）
 const SPARKLE_DENSE = 5000;        // 小颗加密层（满天繁星·适中版）
 const SPARKLE_COUNT = SPARKLE_BASE + SPARKLE_DENSE;
 const SPARKLE_RADIUS = 900;
@@ -980,9 +1010,19 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
   const yBias = dy < 0 ? dy * 0.3 : dy;
   const len = Math.sqrt(dx*dx + yBias*yBias + dz*dz);
   const nx = dx/len, ny = yBias/len, nz = dz/len;
-  sparklePos[i*3]   = nx * SPARKLE_RADIUS;
-  sparklePos[i*3+1] = ny * SPARKLE_RADIUS;
-  sparklePos[i*3+2] = nz * SPARKLE_RADIUS;
+
+  // === 全部粒子放在远场（300~900）球壳上 ===
+  // 之前 30% 近场（30~150）让 sparkle 粒子"飘"在镜头附近，转动相机时 facing
+  // 大幅变化 + 闪烁动画 → 视觉上就是"飘动闪烁的尘埃"，而不是用户想要的
+  //"贴在全景图上的固定闪光点"。
+  // 现在所有粒子都贴在远球壳上，跟着 360° 全景一起转，呈现"全景图反光点"质感。
+  let r;
+  const isNear = false;  // 不再生成近场粒子
+  r = 300 + Math.random() * (SPARKLE_RADIUS - 300);
+  sparklePos[i*3]   = nx * r;
+  sparklePos[i*3+1] = ny * r;
+  sparklePos[i*3+2] = nz * r;
+  // aDir 统一朝相机：近远场都保持稳定 facing，避免 facing=0 导致的闪烁不稳
   sparkleDir[i*3]   = -nx;
   sparkleDir[i*3+1] = -ny;
   sparkleDir[i*3+2] = -nz;
@@ -990,18 +1030,28 @@ for(let i = 0; i < SPARKLE_COUNT; i++){
 
   if(i < SPARKLE_BASE){
     sparkleIsBase[i] = 1.0;  // BASE 层
-    // 前 480 颗：层次配比（大颗大幅缩减，避免运动时一堆十字大花显假）
-    const r = Math.random();
-    if(r < 0.08)      sparkleSize[i] = 14 + Math.random() * 8;    // 大颗（8% / 14~22，原 22% / 22~34）
-    else if(r < 0.45) sparkleSize[i] = 10 + Math.random() * 6;    // 中颗（37% / 10~16）
-    else              sparkleSize[i] = 5 + Math.random() * 5;     // 小颗（55% / 5~10）
+    // 玫瑰宫水晶反光：尺寸大幅拉开层次（小到大跨度大），让画面有"远近水晶"层次感
+    // 大颗（5% / 14~22）：少数几颗特别醒目的"主反光点"
+    // 中颗（25% / 8~14）：中等大小的层次填充
+    // 小颗（40% / 4~8）：常规水晶反光
+    // 极小（30% / 2~4）：最远处的小亮点，呈"星河"质感
+    const rr = Math.random();
+    if(rr < 0.05)      sparkleSize[i] = 14 + Math.random() * 8;   // 大颗（5%）
+    else if(rr < 0.30) sparkleSize[i] = 8  + Math.random() * 6;   // 中颗（25%）
+    else if(rr < 0.70) sparkleSize[i] = 4  + Math.random() * 4;   // 小颗（40%）
+    else               sparkleSize[i] = 2  + Math.random() * 2;   // 极小（30%）
+    // 全部远场（300~900）后不再需要近场倍率，留逻辑兼容
+    if(isNear) sparkleSize[i] *= 0.25;
   } else {
     sparkleIsBase[i] = 0.0;  // DENSE 加密层（细小点）
-    // 后 8000 颗：小颗加密层（5~12 范围）
-    // 球壳半径 900，距离衰减 300/900≈0.33，size 5~12 → 屏幕上 1.6~4px
-    // 之前 2~6 会被 max(1.5) 卡死全锁 1.5px → 加密肉眼几乎不可见
-    // 现在拉到 5~12，加密层真正能看出"细密水晶覆盖"的密度感
-    sparkleSize[i] = 5 + Math.random() * 7;
+    if(isNear){
+      // 近场 DENSE：基础尺寸大幅压低（1~3），靠透视(300/r)放大到 6~30 屏幕像素
+      // 这样近处呈现出"飘飞经过镜头的尘屑"质感，而不是糊脸大白盘
+      sparkleSize[i] = 1 + Math.random() * 2;
+    } else {
+      // 远场 DENSE：原配方 5~12，配合 (300/900)≈0.33 → 屏幕 1.6~4px
+      sparkleSize[i] = 5 + Math.random() * 7;
+    }
   }
 }
 sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
@@ -1016,7 +1066,8 @@ const sparkleMat = new THREE.ShaderMaterial({
     uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
     uOpacity:    { value: 0 },
     uMotion:     { value: 0 },  // 0=静止, 1=快速转动
-    uDenseOnly:  { value: 0 },  // 0=BASE+DENSE 全开（玫瑰宫），1=只显示 DENSE 5000 颗细小点（镜中圣陵）
+    uDenseOnly:  { value: 0 },  // 1=只显示 DENSE 5000 颗细小点（镜中圣陵）
+    uBaseOnly:   { value: 0 },  // 1=只显示 BASE 200 颗十字星芒（玫瑰宫）—— 屏蔽 5000 颗 DENSE 圆点
   },
   vertexShader: `
     attribute vec3 aDir;
@@ -1027,8 +1078,10 @@ const sparkleMat = new THREE.ShaderMaterial({
     uniform float uPixelRatio;
     uniform float uMotion;
     uniform float uDenseOnly;
+    uniform float uBaseOnly;
     varying float vAlpha;
     varying float vFlash;
+    varying float vIsBase;
     void main(){
       vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
       vec3 dirView = normalize((modelViewMatrix * vec4(aDir, 0.0)).xyz);
@@ -1036,8 +1089,12 @@ const sparkleMat = new THREE.ShaderMaterial({
       float facing = clamp(dot(dirView, toCamView) * 0.5 + 0.5, 0.0, 1.0);
       facing = pow(facing, 1.4);
 
+      vIsBase = aIsBase;
+
       // DenseOnly 模式：BASE 层（含大颗星芒）整体隐藏 → size=0 顶点被裁剪
+      // BaseOnly 模式：DENSE 层（5000 颗小圆点）整体隐藏 → 玫瑰宫只剩 200 颗十字星芒
       float visibleScale = mix(1.0, 1.0 - aIsBase, uDenseOnly);
+      visibleScale *= mix(1.0, aIsBase, uBaseOnly);
 
       // 慢速基础闪烁（每颗节奏不同）—— 频率更快 + 振幅更大
       float twinkle = 0.45 + 0.55 * sin(uTime * 2.6 + aSeed * 6.2831);
@@ -1056,11 +1113,18 @@ const sparkleMat = new THREE.ShaderMaterial({
       float intensity = 0.08 + 0.92 * uMotion;
       vAlpha = facing * twinkle * intensity * visibleScale;
 
-      // 闪光瞬间放大颗粒（仅运动时）—— 放大幅度从 ×1.3 收敛到 ×0.7
-      // 避免运动时大颗"爆开"成屏幕上的大十字花（显假）
-      float sizeBoost = 1.0 + vFlash * 0.7;
-      gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0)) * visibleScale;
-      // 最小尺寸下调到 1.5px：让加密的小颗保持"细密针尖感"，不被强制放大
+      // 闪光瞬间放大颗粒（仅运动时）
+      // - DENSE（镜中圣陵）保留 ×0.7 的活泼放大幅度
+      // - BASE（玫瑰宫）只放大 ×0.15，几乎不爆开，避免"转快时变白盘"
+      float boostAmp = mix(0.7, 0.15, aIsBase);
+      float sizeBoost = 1.0 + vFlash * boostAmp;
+      // DENSE 层（aIsBase=0）整体尺寸 ×0.7：比 BASE 小但留足 halo 展开空间
+      float layerSizeScale = mix(0.7, 1.0, aIsBase);
+      gl_PointSize = aSize * uPixelRatio * sizeBoost * (300.0 / max(-mvPos.z, 1.0)) * visibleScale * layerSizeScale;
+      // 上限分层：DENSE 30px / BASE 24px —— BASE 需要足够屏幕像素来呈现"十字星芒"形态
+      // 之前 8px 上限太死，星芒在 8x8 网格里只能糊成圆点
+      float maxPx = mix(30.0, 24.0, aIsBase);
+      gl_PointSize = clamp(gl_PointSize, 0.0, maxPx * uPixelRatio);
       // visibleScale=0 时不应用最小值，让被屏蔽的颗粒彻底消失
       gl_PointSize = mix(0.0, max(gl_PointSize, 1.5), step(0.5, visibleScale));
       gl_Position = projectionMatrix * mvPos;
@@ -1070,29 +1134,44 @@ const sparkleMat = new THREE.ShaderMaterial({
     uniform float uOpacity;
     varying float vAlpha;
     varying float vFlash;
+    varying float vIsBase;
     void main(){
       vec2 uv = gl_PointCoord - 0.5;
       float r = length(uv);
       if(r > 0.5) discard;
 
-      // 1) 圆形核心 —— 强高斯衰减让边缘柔和
-      //    系数 60：在 r=0.18 处衰减到约 14%，r=0.3 时约 0.5% → 几乎只剩中心一点
-      float core = exp(-r * r * 60.0);
-      // 2) 柔光晕（更广但更弱的高斯）
-      float halo = exp(-r * r * 12.0) * 0.35;
+      // 根据是否 BASE 层选择不同的边缘衰减强度
+      // mix(a, b, t)：vIsBase=1（玫瑰宫 BASE）取 b，vIsBase=0（镜中圣陵 DENSE）取 a
+      // - BASE（玫瑰宫水晶）：针点核心 + 双层 halo（近 + 远）+ 短刺星芒，整体高度羽化
+      // - DENSE（镜中圣陵小颗）：核心适中（80）+ halo 显著，呈"小光球"
+      float coreCoef = mix(80.0, 260.0, vIsBase);  // BASE 260 让核心更针点，留更多空间给 halo
+      float haloCoef = mix(6.0,  22.0, vIsBase);   // 近 halo
+      float haloAmp  = mix(0.45, 0.40, vIsBase);   // 近 halo 强度↑
+      float haloFar  = mix(2.0,   5.0, vIsBase);   // 远 halo（大羽化）—— 新增
+      float haloFarAmp = mix(0.0, 0.22, vIsBase);  // BASE 才有远 halo
 
-      // 3) 十字星芒：变细、变软（仅在 flash 时显形，平时几乎看不见）
-      //    使用更软的衰减；并且不在边缘硬切，靠 r 包络让芒尖柔化
-      float crossH = exp(-pow(uv.y * 50.0, 2.0)) * exp(-abs(uv.x) * 3.0);
-      float crossV = exp(-pow(uv.x * 50.0, 2.0)) * exp(-abs(uv.y) * 3.0);
+      // 1) 针点核心
+      float core = exp(-r * r * coreCoef);
+      // 2) 近 halo —— 主要的"光晕模糊"感
+      float halo = exp(-r * r * haloCoef) * haloAmp;
+      // 3) 远 halo —— 羽化外缘，让边界平滑融入背景，消除"贴纸感"
+      float haloOuter = exp(-r * r * haloFar) * haloFarAmp;
+
+      // 4) 短刺星芒（BASE 主形态）—— 不再是"十字"
+      //    关键调整：横向衰减 0.8 → 4.5，臂长大幅缩短（只在中心附近 20% 范围有亮度）
+      //    指数 18 → 12 让臂更粗更柔（粗+短 = 像光斑伸出的小刺，而不是十字线）
+      //    再叠一个 r² 包络（指数 9.0）保证臂尖快速淡出
+      float crossH = exp(-pow(uv.y * 12.0, 2.0)) * exp(-pow(uv.x * 4.5, 2.0));
+      float crossV = exp(-pow(uv.x * 12.0, 2.0)) * exp(-pow(uv.y * 4.5, 2.0));
       float crossLine = max(crossH, crossV);
-      // r 包络：靠近中心强，远端柔和淡出
-      float starEnv = exp(-r * r * 8.0);
-      float star = crossLine * starEnv;
+      // r 包络（9.0）让星芒只在核心附近呈现"星形微凸"，整体仍是圆光斑
+      float starEnv = exp(-r * r * 9.0);
+      // DENSE 层完全去掉星芒（vIsBase=0），只有 BASE 大颗才有
+      float star = crossLine * starEnv * vIsBase;
 
-      // 组合：核心 + 柔晕 始终存在，星芒只在 flash 瞬间显著
-      // 收敛 vFlash 增益（1.8 → 0.9），运动时不再爆开成大十字花
-      float shape = core + halo + star * (0.20 + vFlash * 0.9);
+      // 组合：核心 + 近 halo（模糊） + 远 halo（羽化外缘） + 短刺星芒
+      // 星芒强度降到 0.35（之前 0.55），flash 时 +0.25 → 视觉上更"是一个柔和发光点"
+      float shape = core + halo + haloOuter + star * (0.35 + vFlash * 0.25);
 
       vec3 warm = vec3(1.0, 0.94, 0.78);
       vec3 cool = vec3(1.0, 1.0, 1.0);
@@ -1101,7 +1180,8 @@ const sparkleMat = new THREE.ShaderMaterial({
       col *= 1.0 + vFlash * 0.65;
 
       float a = shape * vAlpha * uOpacity;
-      if(a < 0.005) discard;
+      // discard 阈值 0.004：保留 halo 外圈但切掉极弱噪声
+      if(a < 0.004) discard;
       gl_FragColor = vec4(col, a);
     }
   `,
@@ -1115,10 +1195,10 @@ const sparklePoints = new THREE.Points(sparkleGeo, sparkleMat);
 sparklePoints.frustumCulled = false;
 sparkleGroup.add(sparklePoints);
 
-// —— B. 大颗星芒（Sprite，约 14 颗，烫金颗给镜宫加奢华感）——
-//   原 32 颗 80~150 太多太大、运动时一堆十字花显假；
-//   改为 14 颗 40~80 适中尺寸，星芒更克制、像真的镜面强反光点
-const flareCount = 14;
+// —— B. 大颗星芒（Sprite，约 8 颗，烫金颗给镜宫加奢华感）——
+//   再压：14 颗 40~80 仍然在转快时显得像大花，
+//   改为 8 颗 20~40 让它更含蓄，纯粹是远处的水晶反光暗示
+const flareCount = 8;
 const flareSprites = [];
 for(let i = 0; i < flareCount; i++){
   const u = Math.random(), v = 0.20 + Math.random() * 0.65;
@@ -1137,8 +1217,8 @@ for(let i = 0; i < flareCount; i++){
   });
   const spr = new THREE.Sprite(sprMat);
   spr.position.set(x, y, z);
-  // 缩小：40~80（之前 80~150）让大颗星芒不再喧宾夺主
-  spr.scale.setScalar(40 + Math.random() * 40);
+  // 尺寸再压一档：20~40（之前 40~80）
+  spr.scale.setScalar(20 + Math.random() * 20);
   spr.userData = {
     dir: new THREE.Vector3(-x, -y, -z).normalize(),
     seed: Math.random() * 100,
@@ -1312,7 +1392,7 @@ function geoToXZ(lon, lat){
 
 const COORDINATES = [
   {
-    id: 'golestan', name: 'TEHRAN', zh:'德黑兰 · 格列斯坦宫',
+    id: 'golestan', name: 'TEHRAN', zh:'德黑兰 · 古列斯坦宫',
     lon: 51.42, lat: 35.76, day: 1,
     modelId: 'golestan',
     panoUrl: './golestan_360.jpg',
@@ -1324,10 +1404,8 @@ const COORDINATES = [
       coord: 'TEHRAN · 35.68°N / 51.42°E',
       day: 'day 1',
       lines: [
-        { text: '卡扎尔王朝用十万面镜片铺满这座厅堂。', quiet:false },
-        { text: '光从穹顶落下，被切成千万道，', quiet:false },
-        { text: '让每一位来客都能从四面八方，看见自己。', quiet:false },
-        { text: '两百年来，这里一直叫做——镜厅。', quiet:false },
+        { text: '两百多年来，这里一直被叫做"镜宫"。', quiet:false },
+        { text: '直到<strong class="cue">吊灯被击碎</strong>的那一天——', quiet:false },
       ]
     },
     // 灼烧阶段的文案：突出战争带来的、不可修复的遗憾
@@ -1526,53 +1604,167 @@ const particleMaterial = new THREE.ShaderMaterial({
 const points = new THREE.Points(geometry, particleMaterial);
 scene.add(points);
 
-/* ---------- 氛围粒子 ---------- */
-const ambGeo = new THREE.BufferGeometry();
-const ambPos = new Float32Array(AMBIENT_COUNT*3);
-const ambSeed = new Float32Array(AMBIENT_COUNT);
-for(let i=0;i<AMBIENT_COUNT;i++){
-  ambPos[i*3]=(Math.random()-0.5)*500;
-  ambPos[i*3+1]=Math.random()*200 - 30;  // 主要在上方
-  ambPos[i*3+2]=(Math.random()-0.5)*500;
-  ambSeed[i]=Math.random();
+/* ---------- 氛围粒子 ----------
+ * 分布策略（V3.2，2026-05-30）：sun/cosmos 模式各用一套独立 geometry，避免互相干扰
+ *  • SUN 几何（粉红清真寺早晨）：相机在原点附近 → 球壳多层分布
+ *    - 近层 30%（r=4~18）/ 中层 45%（r=18~55）/ 远层 25%（r=55~140）
+ *    - y 略向上抬 8，营造"晨光柱里浮尘"层次
+ *  • COSMOS 几何（终幕"爆炸变黑"）：相机在 (0,−35,100) 玫瑰宫轨道相机 → 大盒子均匀分布
+ *    - xz∈[−180,180]，y∈[−60,180]
+ *    - aSeed 整体偏小（粒子统一小巧，像满天星点）
+ *  → ambient.geometry 在 sun/cosmos 切换时被替换
+ */
+function _makeSunGeo(){
+  const g = new THREE.BufferGeometry();
+  const pos = new Float32Array(AMBIENT_COUNT*3);
+  const seed = new Float32Array(AMBIENT_COUNT);
+  for(let i=0;i<AMBIENT_COUNT;i++){
+    let rMin, rMax, seedBase;
+    const layerRand = Math.random();
+    if(layerRand < 0.30){
+      rMin = 4;   rMax = 18;   seedBase = 0.55;
+    } else if(layerRand < 0.75){
+      rMin = 18;  rMax = 55;   seedBase = 0.30;
+    } else {
+      rMin = 55;  rMax = 140;  seedBase = 0.05;
+    }
+    const r = Math.pow(Math.random(), 1/3) * (rMax - rMin) + rMin;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(1 - 2 * (Math.random() * 0.7 + 0.15));
+    const sinPhi = Math.sin(phi);
+    pos[i*3]   = r * sinPhi * Math.cos(theta);
+    pos[i*3+1] = r * Math.cos(phi) + 8;
+    pos[i*3+2] = r * sinPhi * Math.sin(theta);
+    seed[i] = Math.max(0.05, Math.min(1.0, seedBase + (Math.random() - 0.5) * 0.4));
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+  return g;
 }
-ambGeo.setAttribute('position', new THREE.BufferAttribute(ambPos, 3));
-ambGeo.setAttribute('aSeed', new THREE.BufferAttribute(ambSeed, 1));
+function _makeCosmosGeo(){
+  // cosmos 模式专用：粒子数翻倍（1200 颗），黑底空旷需要更多星点撑视觉密度
+  const COSMOS_COUNT = AMBIENT_COUNT * 2;
+  const g = new THREE.BufferGeometry();
+  const pos = new Float32Array(COSMOS_COUNT*3);
+  const seed = new Float32Array(COSMOS_COUNT);
+  for(let i=0;i<COSMOS_COUNT;i++){
+    // 终幕相机在 (0,-35,100) 圆轨道朝向 (0,0,0) → 距相机 50~150
+    // 球壳分布以原点为中心，r ∈ [40, 130]
+    const r = 40 + Math.pow(Math.random(), 0.5) * 90;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const sinPhi = Math.sin(phi);
+    pos[i*3]   = r * sinPhi * Math.cos(theta);
+    pos[i*3+1] = r * Math.cos(phi) - 10;
+    pos[i*3+2] = r * sinPhi * Math.sin(theta);
+    // aSeed 偏大（0.4~1.0），让粒子尺寸有保证
+    seed[i] = 0.4 + Math.random() * 0.6;
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+  return g;
+}
+const _ambGeoSun = _makeSunGeo();
+const _ambGeoCosmos = _makeCosmosGeo();
+const ambGeo = _ambGeoSun;  // 默认（玫瑰宫常态用不到，但 ShaderMaterial 需要有 geometry）
 const ambMat = new THREE.ShaderMaterial({
   uniforms:{uTex:{value:spriteTex},uTime:{value:0},uPixelRatio:{value:renderer.getPixelRatio()},
-    uLightDir:{value:new THREE.Vector3(0.55,0.75,0.35).normalize()},uLightMix:{value:0}},
+    uLightDir:{value:new THREE.Vector3(0.55,0.75,0.35).normalize()},uLightMix:{value:0},
+    // 新增：可在 directory.js 里按场景切换的尘埃模式
+    uOpacityScale:{value:1.0}, // 整体不透明度倍数（用于淡入淡出）
+    uSunMode:{value:0.0},      // 1.0 = 阳光下尘埃模式（粉红清真寺早晨）：偏暖、稍大、有光柱感
+    uCosmosMode:{value:0.0},   // 1.0 = 宇宙尘埃模式（终幕变黑）：偏冷蓝白、稍亮、点状
+  },
   vertexShader:`
     attribute float aSeed;
     uniform float uTime, uPixelRatio;
     uniform vec3 uLightDir;
+    uniform float uSunMode, uCosmosMode;
     varying float vLight;
     void main(){
       vec3 p = position;
-      p.x += sin(uTime*0.15 + aSeed*50.0) * 6.0;
-      p.y += cos(uTime*0.12 + aSeed*40.0) * 4.0;
-      p.z += sin(uTime*0.1 + aSeed*30.0) * 5.0;
+      // 飘动幅度：基础 0.8/0.5/0.7
+      //   sun 模式 ×2.5（晨光浮尘真的"飘"起来）
+      //   cosmos 模式 ×0.15（宇宙星尘极慢漂移，肉眼几乎完全静止，只剩呼吸感）
+      float driftAmp = mix(1.0, 2.5, uSunMode);
+      driftAmp *= mix(1.0, 0.15, uCosmosMode);
+      // 时间频率：cosmos 模式压到 0.08×（约 12× 慢于普通模式）
+      float driftSpeed = mix(1.0, 0.08, uCosmosMode);
+      float t = uTime * driftSpeed;
+      p.x += sin(t*0.15 + aSeed*50.0) * 0.8 * driftAmp;
+      p.y += cos(t*0.12 + aSeed*40.0) * 0.5 * driftAmp;
+      p.z += sin(t*0.10 + aSeed*30.0) * 0.7 * driftAmp;
       vLight = smoothstep(-0.2, 0.9, dot(normalize(p), uLightDir));
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
-      gl_PointSize = (0.6 + aSeed*1.1) * 130.0 / -mv.z * uPixelRatio;
+      // 之前 (0.6 + aSeed*1.1) * 130 / -mv.z 在近距离爆开成 20+ px 大白盘，
+      // 系数砍到 1/4：(0.4 + aSeed*0.4) * 32 / -mv.z；
+      // V3.1：max 下限 4.0（既保持近大远小层次，又不会让最近的爆成大白盘）
+      float sz = (0.4 + aSeed*0.4) * 32.0 / max(-mv.z, 4.0) * uPixelRatio;
+      // 阳光模式：适度放大（光柱中飘的浮尘有体积感）
+      // 宇宙模式：大幅放大（黑底 + Additive，远粒子必须 >= 3px 才不被 GPU 丢）
+      sz *= mix(1.0, 2.00, uSunMode);
+      sz *= mix(1.0, 3.00, uCosmosMode);   // V3.3：cosmos 放大系数 1.8 → 3.0，确保远粒子可见
+      gl_PointSize = clamp(sz, 0.0, 16.0 * uPixelRatio);
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader:`
     uniform sampler2D uTex;
     uniform float uLightMix;
+    uniform float uOpacityScale, uSunMode, uCosmosMode;
     varying float vLight;
     void main(){
       vec4 tc = texture2D(uTex, gl_PointCoord);
-      if(tc.a<0.01) discard;
-      float litScene = 0.15 + vLight * 1.2;
-      float lit = mix(0.6, litScene, uLightMix);
-      vec3 colScene = mix(vec3(0.55,0.55,0.65), vec3(1.0,0.85,0.60), vLight);
-      vec3 col = mix(vec3(0.70,0.62,0.50), colScene, uLightMix);
-      float a = mix(0.18, 0.12 + vLight * 0.28, uLightMix);
-      gl_FragColor = vec4(col * lit, tc.a * a);
+      // —— 浮尘 alpha 形状（sun/cosmos 模式用纯净高斯 falloff，避免 spriteTex 内部硬色阶）——
+      // 原 spriteTex 是带"立体球暗部"的 5 段渐变，边缘过渡硬，看起来像小白盘
+      // 这里改用从中心到边缘的纯指数衰减：中心 a=1，0.4 半径 a≈0.4，边缘 a≈0
+      float d = distance(gl_PointCoord, vec2(0.5));
+      // pow(1-2d, k) 形 + 高斯 exp(-k*d^2) 混合，得到柔软的"晕"
+      float halo = exp(-d * d * 14.0);                     // 高斯主体
+      halo *= smoothstep(0.5, 0.30, d);                    // 边缘平滑收口（0.5 处归零）
+      if(halo < 0.005 && tc.a < 0.01) discard;
+      // 哑光浮尘：取消"光照方向变化导致的闪烁"，固定低亮度灰白
+      float lit = mix(0.45, 0.30 + vLight * 0.10, uLightMix);
+      vec3 colScene = mix(vec3(0.60,0.58,0.62), vec3(0.78,0.72,0.62), vLight);
+      vec3 col = mix(vec3(0.65,0.60,0.50), colScene, uLightMix);
+      float a = mix(0.14, 0.10 + vLight * 0.05, uLightMix);
+
+      // —— 阳光下尘埃模式（粉红清真寺早晨）——
+      //   颜色：暖白；混合：Additive；alpha 形状：高斯 halo（边缘极朦胧）
+      if(uSunMode > 0.5){
+        vec3 sunHot  = vec3(1.00, 0.98, 0.92);
+        vec3 sunWarm = vec3(1.00, 0.92, 0.78);
+        col = mix(sunWarm, sunHot, vLight);
+        lit = 1.00;
+        a   = 0.85;          // 中心强度（halo 自带衰减，不需要再乘 spriteTex）
+      }
+      // —— 宇宙尘埃模式（终幕"爆炸变黑"）——
+      //   黑底 + Additive：alpha 提高到 0.85 让星尘在黑底上像真实星点一样亮
+      if(uCosmosMode > 0.5){
+        vec3 cosmosCol = vec3(0.92, 0.94, 1.00);  // 略提冷蓝白亮度
+        col = cosmosCol;
+        lit = 1.00;
+        a   = 0.85;
+      }
+
+      // sun/cosmos 用高斯 halo 代替 spriteTex.a；普通模式仍用 spriteTex.a 保留原立体感
+      float useHalo = max(uSunMode, uCosmosMode);
+      float finalA = mix(tc.a, halo, useHalo);
+      gl_FragColor = vec4(col * lit, finalA * a * uOpacityScale);
     }`,
-  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,  // sun/宇宙都靠 Additive 提亮可见性
 });
 const ambient = new THREE.Points(ambGeo, ambMat);
+/* 暴露给 directory.js：按尘埃模式切换粒子分布几何
+ * sun → 球壳多层（近大远小有层次，配合原点附近相机）
+ * cosmos → 大盒子均匀（满天星点，配合终幕轨道相机）
+ * 普通 → 默认球壳（玫瑰宫常态本来就不显示 ambient） */
+window._setAmbientLayout = function(mode){
+  if(mode === 'cosmos' && ambient.geometry !== _ambGeoCosmos){
+    ambient.geometry = _ambGeoCosmos;
+  } else if(mode === 'sun' && ambient.geometry !== _ambGeoSun){
+    ambient.geometry = _ambGeoSun;
+  }
+};
 scene.add(ambient);
 
 /* ================================================================
@@ -2058,7 +2250,7 @@ function buildScatteredPositions(){
  *  使用真实碎玻璃 3D 模型（broken_wine_glass.glb，257 块独立碎片 mesh）
  * ================================================================ */
 const SHARD_COUNT = isMobile ? 120 : 250;
-const DUST_COUNT  = isMobile ? 600 : 1500;
+const DUST_COUNT  = isMobile ? 200 : 500;
 
 // 碎片模型缓存
 let shardModelMeshes = null; // 加载后的碎片 mesh 数组
@@ -2267,6 +2459,22 @@ function enterChandelierScene(){
   bottomLight.position.set(0, -30, 0);
   container.add(bottomLight);
 
+  /* —— 引导用：吊灯整体呼吸（亮度起伏 ±8%，2.5s 周期） ——
+   *  在 tick() 里每帧根据 _idlePulseStartTime + _idlePulseActive 调制 4 个灯的 intensity。
+   *  状态由 _idlePulseActive 控制：
+   *    - true：进吊灯 idle，呼吸召唤
+   *    - false：用户首次交互 / 开始崩塌 → 恢复基准亮度并停止
+   *  保存 base intensity 用于一键还原。
+   */
+  mdlG._idleLights = [
+    { light: dirLight,    base: dirLight.intensity },
+    { light: dirLight2,   base: dirLight2.intensity },
+    { light: ambLight,    base: ambLight.intensity },
+    { light: bottomLight, base: bottomLight.intensity },
+  ];
+  mdlG._idlePulseActive = true;
+  mdlG._idlePulseStartTime = performance.now();
+
   // 碎片也放进容器（初始隐藏）
   if(mdlG.shardMesh){
     // 碎片需要反向缩放（因为 container 已经 scale 了，碎片位置是世界空间的）
@@ -2328,6 +2536,7 @@ function createDustSystemWorld(samplePool, worldSize, modelCenter){
   const count = DUST_COUNT;
   const geo = new THREE.BufferGeometry();
   const posArr = new Float32Array(count * 3);
+  const sizeArr = new Float32Array(count);  // per-particle 基础尺寸（让粒子有大小层次）
   dustData = [];
 
   const range = Math.max(worldSize.x, worldSize.y, worldSize.z);
@@ -2357,6 +2566,21 @@ function createDustSystemWorld(samplePool, worldSize, modelCenter){
     const py = camPos.y + dy * rRand;
     const pz = camPos.z + dz * rRand;
     posArr[i*3] = px; posArr[i*3+1] = py; posArr[i*3+2] = pz;
+
+    // —— 每颗粒子基础尺寸分层 —— 营造大小差异的层次感
+    //   55% 小（0.6~1.2）：远景细密星尘的主体
+    //   30% 中（1.4~2.2）：中景，构成画面骨架
+    //   15% 大（2.6~4.0）：少数几颗"焦点"亮点，强化前后景对比
+    const sizeR = Math.random();
+    let baseSize;
+    if(sizeR < 0.55){
+      baseSize = 0.6 + Math.random() * 0.6;
+    } else if(sizeR < 0.85){
+      baseSize = 1.4 + Math.random() * 0.8;
+    } else {
+      baseSize = 2.6 + Math.random() * 1.4;
+    }
+    sizeArr[i] = baseSize;
     dustData.push({
       x: px, y: py, z: pz,
       // 微弱的随机漂浮速度（不再带"-range*0.002"的整体下沉，否则上半球会变空）
@@ -2372,14 +2596,52 @@ function createDustSystemWorld(samplePool, worldSize, modelCenter){
     });
   }
   geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(sizeArr, 1));
 
-  const mat = new THREE.PointsMaterial({
-    color: 0xddeeff,
-    size: Math.min(range * 0.005, 4),
-    map: crystalTex,
-    transparent: true, opacity: 0.0,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false, sizeAttenuation: true,
+  /* —— per-particle 尺寸 + 距离衰减的 ShaderMaterial ——
+   * PointsMaterial 只能全局统一 size，无法体现层次。
+   * 用 aSize attribute 让每颗粒子有自己的基础尺寸（55% 小 / 30% 中 / 15% 大），
+   * 再叠加距离衰减 (300 / -mv.z)，自然形成"近大远小"的纵深感。
+   * uOpacity 取代 material.opacity，外部仍可通过下方 set opacity 代理写入。
+   */
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTex: { value: crystalTex },
+      uColor: { value: new THREE.Color(0xc8d0e0) },  // 冷蓝白星尘
+      uOpacity: { value: 0.0 },
+      uPixelRatio: { value: renderer.getPixelRatio() },
+    },
+    vertexShader: `
+      attribute float aSize;
+      uniform float uPixelRatio;
+      void main(){
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        // aSize 基础尺寸 × 距离衰减；clamp 防止近距离爆开
+        // 300 是衰减系数（aSize=1 在距离 300 时 ≈1px，距离 30 时 ≈10px）
+        float sz = aSize * 300.0 / max(-mv.z, 30.0) * uPixelRatio;
+        gl_PointSize = clamp(sz, 0.5, 18.0 * uPixelRatio);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uTex;
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      void main(){
+        vec4 tc = texture2D(uTex, gl_PointCoord);
+        if(tc.a < 0.01) discard;
+        gl_FragColor = vec4(uColor, tc.a * uOpacity);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+  });
+  // 兼容旧代码 `dustPoints.material.opacity = x`：定义 setter 转写到 uniform
+  Object.defineProperty(mat, 'opacity', {
+    get(){ return this.uniforms.uOpacity.value; },
+    set(v){ this.uniforms.uOpacity.value = v; },
+    configurable: true,
   });
 
   dustPoints = new THREE.Points(geo, mat);
@@ -2391,10 +2653,43 @@ function createDustSystemWorld(samplePool, worldSize, modelCenter){
 // 碎片动画 mixer
 let shardMixer = null;
 
+function _stopChandelierIdlePulse(){
+  const mdlG = MODELS.golestan;
+  if(!mdlG || !mdlG._idlePulseActive) return;
+  mdlG._idlePulseActive = false;
+  // 还原 4 个灯到 base intensity（避免停在某个非整周期点导致暗一下）
+  if(mdlG._idleLights){
+    for(const it of mdlG._idleLights){
+      if(it.light) it.light.intensity = it.base;
+    }
+  }
+}
+
+function updateChandelierIdlePulse(now){
+  const mdlG = MODELS.golestan;
+  if(!mdlG || !mdlG._idlePulseActive) return;
+  if(!mdlG._idleLights || !mdlG._idleLights.length) return;
+  // 仅吊灯 idle 状态下生效（碎裂中/已碎裂不再呼吸）
+  if(mdlG.collapseState && mdlG.collapseState !== 'idle') return;
+
+  const t = (now - (mdlG._idlePulseStartTime || now)) / 1000;
+  // 2.5s 周期 ↔ ω = 2π/2.5
+  // 起手 0.6s 渐入（避免进场瞬间灯光抖动），用 (1 - cos(πt/0.6))/2 做柔启
+  const fadeIn = t < 0.6 ? 0.5 - 0.5 * Math.cos(Math.PI * t / 0.6) : 1.0;
+  const omega = 2 * Math.PI / 2.5;
+  const breathe = 1.0 + Math.sin(t * omega) * 0.08 * fadeIn;
+  for(const it of mdlG._idleLights){
+    if(it.light) it.light.intensity = it.base * breathe;
+  }
+}
+
 function triggerChandelierCollapse(){
   const mdlG = MODELS.golestan;
   if(mdlG.collapseState !== 'idle') return;
   if(!shardModelMeshes || !shardModelMeshes.scene){ console.warn('[shard] 碎片模型未加载'); return; }
+
+  // 停止"召唤"呼吸 + 还原灯光基准强度
+  _stopChandelierIdlePulse();
 
   // —— 目录模式参数 ——
   // 碎片动画播到 _collapsePauseT 秒时定格（碎片刚爆开还未落地，悬停在空中），
@@ -2613,8 +2908,10 @@ function triggerChandelierCollapse(){
     setTimeout(()=>{
       if(mdlG.collapseState !== 'collapsing') return;
       // 直接替换内部 HTML（容器 .show 保留），然后切到崩坏样式
+      // 第三参 false：崩坏阶段绝对不输出 card-title / card-subtitle，
+      //   只渲染纯叙事 5 行 p（避免"德黑兰·古列斯坦宫"单独裸奔在画面上）
       storyEl.querySelector('.story-card-inner').innerHTML =
-        buildStoryHTML(collapseStoryData, COORDINATES[currentSceneIdx]);
+        buildStoryHTML(collapseStoryData, COORDINATES[currentSceneIdx], false);
       storyEl.classList.add('collapse-story');
       // 确保容器仍可见（从浏览器视角"内容刷新"，淡入靠 p 自己的 .show 触发）
       if(!storyEl.classList.contains('show')) storyEl.classList.add('show');
@@ -2919,16 +3216,13 @@ function updateChandelierCollapse(dt, time){
   // 微尘更新（球壳分布：以相机为中心包围观察者，飘出外壳就回卷到对侧球壳）
   if(dustPoints && dustData.length > 0){
     const dPos = dustPoints.geometry.getAttribute('position');
-    // 0~0.5s 渐入到 0.7；0.5~5s 保持 0.7；5s 之后柔和回落到 0.38（不再消失）
-    // —— 让灼烧到全黑后仍有"风中余烬"的微尘悬浮
+    // —— 终幕烧灼到全黑后这是唯一的"星辰余烬"层，opacity 拉到 0.55 让黑底上清晰可见
+    //    渐入 0.6s（同步烧灼起步）→ 保持 0.55（绵长悬浮）
     let dustOpacity;
-    if(elapsed < 0.5){
-      dustOpacity = elapsed / 0.5 * 0.7;
-    } else if(elapsed < 5){
-      dustOpacity = 0.7;
+    if(elapsed < 0.6){
+      dustOpacity = elapsed / 0.6 * 0.55;
     } else {
-      const t = Math.min(1, (elapsed - 5) / 3);
-      dustOpacity = 0.7 - t * (0.7 - 0.38);
+      dustOpacity = 0.55;
     }
     dustPoints.material.opacity = dustOpacity;
 
@@ -2939,8 +3233,8 @@ function updateChandelierCollapse(dt, time){
       const d = dustData[i];
       if(elapsed < d.delay) continue;
       d.x += d.vx * dtSec; d.y += d.vy * dtSec; d.z += d.vz * dtSec;
-      d.x += Math.sin(time * 0.001 * d.twinkleSpeed + d.twinklePhase) * 0.01;
-      d.y += Math.cos(time * 0.001 * d.twinkleSpeed * 0.7 + d.twinklePhase) * 0.005;
+      // 关掉每帧 sin/cos 位置抖动 —— 之前抖动让粒子互相穿越，视觉上形成"闪烁"
+      // 尘埃就是匀速飘，不要每帧颠
 
       // —— 回卷：超出外球壳的微尘从对侧（相对相机）以略大于内半径处重新出现 ——
       // 保证视野任何方向都始终有微尘填充，不会"飘走变空"
@@ -3086,6 +3380,7 @@ function cleanupChandelierScene(){
   mdlG._collapseDirectoryReady = false;
   mdlG._collapsePauseT = null;
   mdlG._directoryDoneCount = 0;
+  mdlG._directoryVisitedOrder = [];
   if(mdlG._collapseTimeout) clearTimeout(mdlG._collapseTimeout);
   if(mdlG._nextHintTimeout) clearTimeout(mdlG._nextHintTimeout);
   mdlG._collapseTimeout = null;
@@ -3184,7 +3479,7 @@ function createCoordLabels(){
     const el = document.createElement('div');
     el.className = 'coord-label';
     el.dataset.idx = idx;
-    el.innerHTML = `<div class="dot"></div><div class="name">${c.name}</div><div class="day">day ${String(c.day).padStart(3,'0')}</div>`;
+    el.innerHTML = `<div class="dot"></div><div class="name">${c.name}</div>`;
     el.addEventListener('click', (e) => { e.stopPropagation(); onCoordClick(idx); });
     coordLabelsEl.appendChild(el);
     c.labelEl = el;
@@ -3319,6 +3614,7 @@ function enterScene(idx){
   camYaw = 0;
   smoothYaw = PANO_YAW_OFFSET;
   smoothPitch = 0;
+  dragPitch = 0; // 重置拖拽累计 pitch
 
   // === 判断是否走新管线（场景 1 golestan 实体模型） ===
   const isGolestan = (coord.modelId === 'golestan');
@@ -3411,6 +3707,20 @@ function enterScene(idx){
   }
   // 启用反光光点（仅 golestan 场景）
   sparkleGroup.visible = (sceneIdForPano === 'golestan');
+  // 镜宫全景球壳的"贴在球面上的固定闪光点"由 sparkleGroup 提供，
+  // ambient（空间漂浮粒子）在镜宫里默认隐藏，避免干扰碎片亮点。
+  // 但终幕"宇宙尘埃"模式下 directory.js 会显式 _ambTargetOpacity=1 → 不要在此覆盖
+  if(sceneIdForPano === 'golestan'){
+    const ambExplicit = (typeof window._ambTargetOpacity === 'number' && window._ambTargetOpacity > 0.01);
+    if(!ambExplicit){
+      ambient.visible = false;
+      window._ambTargetOpacity = 0.0;
+    }
+    // 玫瑰宫只显示 200 颗 BASE 十字星芒，屏蔽 5000 颗 DENSE 小圆点
+    // （DENSE 是镜中圣陵专用，玫瑰宫开它会满屏白点）
+    if(sparkleMat.uniforms.uBaseOnly) sparkleMat.uniforms.uBaseOnly.value = 1;
+    if(sparkleMat.uniforms.uDenseOnly) sparkleMat.uniforms.uDenseOnly.value = 0;
+  }
   // 根据屏幕宽高比动态调整 FOV
   if(newPipelineReady){
     const aspect = window.innerWidth / window.innerHeight;
@@ -3449,17 +3759,12 @@ function enterScene(idx){
     if(newPipelineReady){
       // 新管线（吊灯/地毯）：进场立即显示介绍文案
       storyEl.classList.add('show');
-      // 启用自动慢速旋转
       autoRotateActive = true;
       autoRotateYaw = 0;
       autoRotateSpeed = AUTO_ROTATE_SPEED_BASE;
       _autoRotateBoostStart = 0;
-      // 触发提示文案：吊灯（已按需求去掉 "tap to shatter" 文字，仅保留逻辑流，不再显示提示）
+      // press-hint 在故事卡场景统一不展示（"吊灯被击碎"高亮自带引导）
       pressHintEl.innerHTML = '';
-      // 不再显示 pressHint（按需求隐藏所有 tap-to 引导文字）
-      setTimeout(()=>{
-        if(mode===MODE.SCENE) pressHintEl.classList.add('show');
-      }, 1200);
     } else {
       setTimeout(()=>{
         if(mode===MODE.SCENE && sceneState===SCENE_STATE.IDLE) pressHintEl.classList.add('show');
@@ -3467,7 +3772,7 @@ function enterScene(idx){
     }
   } else {
     phTitle.textContent = coord.zh;
-    phEn.textContent = `${coord.name.toLowerCase()} · day ${coord.day} · coming soon`;
+    phEn.textContent = `${coord.name.toLowerCase()} · coming soon`;
     placeholderEl.classList.add('show');
     pressHintEl.classList.remove('show');
     setTimeout(()=>{ if(mode===MODE.SCENE) nextHint.classList.add('show'); }, 2800);
@@ -3487,12 +3792,18 @@ function buildSceneGroundPositions(){
   }
 }
 
-function buildStoryHTML(s, coord){
+function buildStoryHTML(s, coord, includeHeader){
+  // includeHeader: 是否输出 card-title("德黑兰·古列斯坦宫") + card-subtitle(经纬度)
+  //   默认 true（idle 进场展示完整三件套）
+  //   collapse 阶段必须传 false —— 否则击碎过程中 card-title 会以"单独一行"的形式
+  //   裸奔在画面顶部（用户明确禁止此现象，避免再次在任何场合出现）
+  if(typeof includeHeader === 'undefined') includeHeader = true;
   let html = '';
-  html += `<div class="card-title">${coord.zh}</div>`;
-  html += `<div class="card-subtitle">${s.coord} <em>${s.day}</em></div>`;
+  if(includeHeader){
+    html += `<div class="card-title">${coord.zh}</div>`;
+    html += `<div class="card-subtitle">${s.coord}</div>`;
+  }
   s.lines.forEach(l => { html += `<p class="${l.quiet?'quiet':''}">${l.text}</p>`; });
-  html += `<div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg></div>`;
   return html;
 }
 
@@ -3642,6 +3953,8 @@ const exploreOffset = { x:0, y:0, z:0 };
 let dragging = false;
 let dragStartX = 0, dragStartY = 0;
 let dragStartYaw = 0;
+let dragStartPitch = 0;
+let dragPitch = 0; // 累计拖拽 pitch（不被陀螺仪覆盖）
 let pointerActive = false;
 let pressPointerStartX = 0, pressPointerStartY = 0;
 
@@ -3777,6 +4090,7 @@ canvas.addEventListener('pointerdown', (e)=>{
   dragging = true;
   dragStartX = e.clientX; dragStartY = e.clientY;
   dragStartYaw = camYaw;
+  dragStartPitch = dragPitch;
 
   if(mode === MODE.SCENE){
     // 新管线（吊灯）：不需要长按聚合粒子
@@ -3800,6 +4114,12 @@ window.addEventListener('pointermove', (e)=>{
   // 记录用户操作时间戳（拖拽中持续刷新），3 秒静止后会自动恢复旋转
   if(Math.abs(dx) > 2 || Math.abs(dy) > 2){
     _lastUserInteractTime = performance.now();
+    // 用户开始主动探索 → 停止吊灯召唤呼吸（说明用户已经在意识到场景）
+    if(typeof _stopChandelierIdlePulse === 'function') _stopChandelierIdlePulse();
+    // 用户首次拖动 → 隐藏「轻触吊灯」提示
+    if(typeof pressHintEl !== 'undefined' && pressHintEl){
+      pressHintEl.classList.remove('show');
+    }
   }
 
   if(mode === MODE.SCENE && sceneState === SCENE_STATE.GATHERING){
@@ -3813,12 +4133,18 @@ window.addEventListener('pointermove', (e)=>{
 
   // 水平旋转 + 垂直俯仰
   const yawSens = (mode === MODE.SCENE) ? 0.012 : 0.004;
-  const pitchSens = (mode === MODE.SCENE) ? 0.008 : 0;
+  // 子全景模式下也允许垂直拖拽，灵敏度和水平相当
+  const pitchSens = (mode === MODE.SCENE) ? 0.008 : 0.004;
   camYaw = dragStartYaw + dx * yawSens;
-  // 垂直方向：直接更新 smoothPitch 目标（场景模式下有效）
+  // 垂直方向：累加到 dragPitch，避免被陀螺仪逻辑覆盖
+  // 子全景允许 ±60°（看天花板/地面），主场景保持 ±0.5
+  const pitchDelta = -dy * pitchSens; // 向上拖 = 向上看
   if(mode === MODE.SCENE){
-    const pitchDelta = -dy * pitchSens; // 向上拖 = 向上看
-    smoothPitch = Math.max(-0.5, Math.min(0.5, pitchDelta));
+    dragPitch = Math.max(-0.5, Math.min(0.5, dragStartPitch + pitchDelta));
+  } else {
+    // 子全景模式
+    const PANO_PITCH_LIMIT = Math.PI / 180 * 60;
+    dragPitch = Math.max(-PANO_PITCH_LIMIT, Math.min(PANO_PITCH_LIMIT, dragStartPitch + pitchDelta));
   }
 });
 window.addEventListener('pointerup', (e)=>{
@@ -4210,6 +4536,42 @@ function tick(){
   particleMaterial.uniforms.uTime.value = time;
   ambMat.uniforms.uTime.value = time;
 
+  /* —— ambient 尘埃整体透明度平滑插值（由 directory.js 设置 _ambTargetOpacity 控制）——
+   * 进入 pink 场景：_ambTargetOpacity = 1 → 0.045/帧 平滑拉到 1（约 1.5s 内浮现，与火焰过渡同步）
+   * 离开 pink / 玫瑰宫：_ambTargetOpacity = 0 → 平滑淡出，淡到 < 0.01 后隐藏 ambient.visible = false 省 draw call
+   * 终幕：_ambTargetOpacity = 1 → 与火焰一起浮起宇宙星尘 */
+  {
+    const target = (typeof window._ambTargetOpacity === 'number') ? window._ambTargetOpacity : (ambient.visible ? 1.0 : 0.0);
+    const cur = ambMat.uniforms.uOpacityScale.value;
+    if(Math.abs(target - cur) > 0.001){
+      ambMat.uniforms.uOpacityScale.value = cur + (target - cur) * 0.045;
+    } else {
+      ambMat.uniforms.uOpacityScale.value = target;
+    }
+    // 完全淡出：彻底隐藏（省 draw call）；起步淡入：先 visible=true 再让 opacity 拉上去
+    if(target > 0.01 && !ambient.visible) ambient.visible = true;
+    if(ambMat.uniforms.uOpacityScale.value < 0.005 && target < 0.01 && ambient.visible) ambient.visible = false;
+  }
+
+  /* —— 调试 HUD（仅 window._dustHudEnabled === true 时显式启用）—— */
+  if(typeof window !== 'undefined' && window._dustHudEnabled === true){
+    let hud = document.getElementById('_dustHud');
+    if(!hud){
+      hud = document.createElement('div');
+      hud.id = '_dustHud';
+      hud.style.cssText = 'position:fixed;top:8px;right:8px;z-index:99999;font:11px/1.4 monospace;color:#fff;background:rgba(0,0,0,.6);padding:6px 8px;border-radius:4px;pointer-events:none;white-space:pre;';
+      document.body.appendChild(hud);
+    }
+    hud.textContent =
+      'ambient.visible = ' + ambient.visible +
+      '\nuOpacityScale = ' + ambMat.uniforms.uOpacityScale.value.toFixed(3) +
+      '\nuSunMode = ' + ambMat.uniforms.uSunMode.value.toFixed(2) +
+      '\nuCosmosMode = ' + ambMat.uniforms.uCosmosMode.value.toFixed(2) +
+      '\n_ambTargetOpacity = ' + (typeof window._ambTargetOpacity === 'number' ? window._ambTargetOpacity.toFixed(2) : 'undef') +
+      '\nparticle count = ' + (ambient.geometry && ambient.geometry.attributes.position ? ambient.geometry.attributes.position.count : '?') +
+      '\nblending = Additive';
+  }
+
   // 全景反光光点更新
   if(sparkleGroup.visible){
     sparkleMat.uniforms.uTime.value = time;
@@ -4262,6 +4624,9 @@ function tick(){
   }
 
   updateTween(now);
+
+  // 吊灯 idle 呼吸（引导用户点击）
+  updateChandelierIdlePulse(now);
 
   // 方向光混合
   const targetLightMix = (mode === MODE.SCENE || mode === MODE.TRANSITION) ? 1 : 0.4;
@@ -4371,7 +4736,8 @@ function tick(){
       }
       // 目标 yaw/pitch：陀螺仪 + 拖动叠加（手机上也能手指左右滑动切换视角） + 自动旋转
       const targetYaw   = (useGyro ? gyroYaw + camYaw : camYaw) + PANO_YAW_OFFSET + autoRotateYaw;
-      const targetPitch = useGyro ? gyroPitch : 0;
+      // pitch：陀螺仪角度 + 拖拽累计角度都生效（让用户即使开着陀螺仪也能用手指补充上下视角）
+      const targetPitch = (useGyro ? gyroPitch : 0) + dragPitch;
 
       const lerpSpeed = 0.08;
       smoothYaw   += (targetYaw   - smoothYaw)   * lerpSpeed;
@@ -4379,10 +4745,66 @@ function tick(){
 
       // 判断是否是吊灯新管线场景
       const isGolestanCam = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
-      // 子场景全景图模式：从镜宫进入子场景时 currentSceneIdx 没变，isGolestanCam 仍为 true，
-      // 但用户已经在子场景全景图里，必须走"平视全景"分支（赤道线 y=0），不能再用吊灯轨道（y=-35 仰视）
-      const _isDirPanoMode = (typeof _dirCurrentSceneIdx !== 'undefined') && _dirCurrentSceneIdx >= 0;
-      if(isGolestanCam && !_isDirPanoMode){
+      // 子场景全景图模式：进入子场景的瞬间立即切到"球心平视"（B 公式），
+      // 同时由 directory.js 用 _dirCamTween 把 dragPitch/camYaw/autoRotateYaw 朝 0 收敛，
+      // 让用户在 3.0s 火焰过渡内丝滑收敛到新场景的"正前方·平视"。
+      // —— 不再引入 A 公式（吊灯仰视），避免点击瞬间画面"猛地转到仰视吊灯"。
+      const _dirIdx = (typeof _dirCurrentSceneIdx !== 'undefined') ? _dirCurrentSceneIdx : -1;
+      const _isDirPanoMode = (_dirIdx >= 0);
+      /* —— 子场景→玫瑰宫"相机模式过渡 lerp"：window._dirHomeCamLerp 是 directory.js
+       *    在 closeDirectoryOverlay 时启动的状态对象 { startTime, durMs }。
+       *    在过渡期内，把"球心模式"和"玫瑰宫圆轨道模式"按 ease-in-out cubic 插值，
+       *    让相机位置/朝向与火焰过渡同步演变，避免"火焰结束才瞬切相机"的视觉跳变。 */
+      let _dirHomeLerpK = -1; // -1 表示无插值
+      if(window._dirHomeCamLerp && typeof window._dirHomeCamLerp.startTime === 'number'){
+        const _lerp = window._dirHomeCamLerp;
+        const _kRaw = (now - _lerp.startTime) / _lerp.durMs;
+        if(_kRaw >= 0 && _kRaw <= 1){
+          _dirHomeLerpK = _kRaw < 0.5 ? 4*_kRaw*_kRaw*_kRaw : 1 - Math.pow(-2*_kRaw + 2, 3) / 2;
+        } else if(_kRaw > 1){
+          /* —— 修复 2026-05-30：不主动清 lerp，避免与 directory.js onComplete 错位 ——
+           * 旧版：k>1 立即 _dirHomeCamLerp=null → 那一帧若 _dirCurrentSceneIdx 还 >= 0
+           *       会瞬间走子场景全景分支（camera.set(0,0,0)），造成画面闪一下
+           * 新版：k>1 时把 K 锁到 1（保持 lerp 终点 transform），由 directory.js
+           *       的 crossfade onComplete 同步清 _dirHomeCamLerp + _dirCurrentSceneIdx，
+           *       两者在同一帧切换 → 无错位、无闪烁 */
+          _dirHomeLerpK = 1;
+        }
+      }
+
+      if(isGolestanCam && _dirHomeLerpK >= 0){
+        /* 过渡 lerp 进行中：从"相机当前真实视角"渐变到"玫瑰宫圆轨道视角"。
+         * 起点（k=0）：position = lerp 启动时的 camera.position 快照
+         *              lookAt   = lerp 启动时的 camera 看向的点（沿视线 100 单位的点）
+         * 终点（k=1）：position = (-sin(yaw)·100, -35, -cos(yaw)·100)
+         *              lookAt   = (0, 0, 0)
+         * 线性插值 position 和 lookAt 两个端点 → 走最短路径，不绕路、不仰视顶部。 */
+        const k = _dirHomeLerpK;
+        const orbitR = 100;
+        const orbitY = -35;
+        const _lerpSt = window._dirHomeCamLerp || {};
+        // 起点：直接用启动时快照的相机位置 + 看向点
+        const fromPx = (typeof _lerpSt.startPosX === 'number') ? _lerpSt.startPosX : 0;
+        const fromPy = (typeof _lerpSt.startPosY === 'number') ? _lerpSt.startPosY : 0;
+        const fromPz = (typeof _lerpSt.startPosZ === 'number') ? _lerpSt.startPosZ : 0;
+        const fromLx = (typeof _lerpSt.startLookX === 'number') ? _lerpSt.startLookX : -Math.sin(smoothYaw) * 100;
+        const fromLy = (typeof _lerpSt.startLookY === 'number') ? _lerpSt.startLookY : 0;
+        const fromLz = (typeof _lerpSt.startLookZ === 'number') ? _lerpSt.startLookZ : -Math.cos(smoothYaw) * 100;
+        // 终点：玫瑰宫圆轨道（与下面 isGolestanCam && !_isDirPanoMode 分支保持完全一致）
+        const _yaw = smoothYaw;
+        const toPx = -Math.sin(_yaw) * orbitR;
+        const toPy = orbitY;
+        const toPz = -Math.cos(_yaw) * orbitR;
+        const toLx = 0, toLy = 0, toLz = 0;
+        camera.position.x = fromPx + (toPx - fromPx) * k;
+        camera.position.y = fromPy + (toPy - fromPy) * k;
+        camera.position.z = fromPz + (toPz - fromPz) * k;
+        camera.lookAt(
+          fromLx + (toLx - fromLx) * k,
+          fromLy + (toLy - fromLy) * k,
+          fromLz + (toLz - fromLz) * k
+        );
+      } else if(isGolestanCam && !_isDirPanoMode){
         // 吊灯在原点，相机在水平圆轨道上微仰视
         const orbitR = 100;
         const orbitY = -35;
@@ -4395,7 +4817,7 @@ function tick(){
         // pitch 影响 lookAt 目标点的 Y（仰角），不再硬编码为 0
         const lookDist = 100;
         const lookY = Math.sin(smoothPitch) * lookDist;
-        const horiz = Math.cos(smoothPitch) * lookDist;  // 水平面分量（仰角越大，水平面分量越小）
+        const horiz = Math.cos(smoothPitch) * lookDist;
         camera.position.set(0, 0, 0);
         camera.lookAt(
           -Math.sin(smoothYaw) * horiz,

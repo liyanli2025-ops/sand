@@ -79,7 +79,7 @@ THE SAND THAT CANNOT BE GATHERED
 
 | 字段 | 内容 |
 |------|------|
-| **地点** | 德黑兰 · 格列斯坦宫 |
+| **地点** | 德黑兰 · 古列斯坦宫 |
 | **时间** | Day 1 / 100 |
 | **主题色** | 金色 · 暖白 |
 
@@ -105,7 +105,7 @@ THE SAND THAT CANNOT BE GATHERED
 
 ```
 GOLESTAN PALACE · MIRROR HALL
-格列斯坦宫 · 镜厅
+古列斯坦宫 · 镜厅
 
 TEHRAN · DAY 1 / 100
 

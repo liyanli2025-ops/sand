@@ -8,7 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>聚不起的沙 · 伊朗·100天</title>
 
-<link rel="stylesheet" href="./style.css">
+<link rel="stylesheet" href="./style_v2.css">
 </head>
 <body class="splash-mode">
 
@@ -20,21 +20,26 @@
     src="https://mat1.gtimg.com/qqcdn/redian/sand_test/start.mp4"></video>
   <div class="splash-overlay"></div>
   <div class="splash-content">
-    <div class="splash-tag">OPERATION · <b>IRAN</b> · 2026</div>
     <img class="splash-logo" src="./assets/logo_v2.png" alt="聚不起的沙">
-    <div class="splash-desc">
-      100 天，伊朗在消失。<br>
-      6 个瞬间，每一个都触手可及，每一个都留不住。
+    <div class="splash-desc-stack">
+      <div class="splash-desc splash-desc-1">
+        古列斯坦宫的镜厅，波斯美学的传世之作。<br>
+        两百年前，工匠把十万面镜片，<br>
+        一寸一寸贴上穹顶，<br>
+        创造了这脆弱而璀璨的杰作。
+      </div>
+      <div class="splash-desc splash-desc-2">
+        2026 年 3 月 23 日，<br>
+        镜厅在美以空袭中受损。<br>
+        散落一地的，<br>
+        不是镜子的碎片，<br>
+        而是文明的碎片。
+      </div>
     </div>
     <div class="splash-enter" id="splashEnter">
       <span class="splash-enter-line"></span>
-      <span class="splash-enter-text">触碰进入</span>
+      <span class="splash-enter-text">回到现场</span>
       <span class="splash-enter-line"></span>
-    </div>
-    <div class="splash-footer">
-      <span class="splash-date">2026.03.20 — 06.28</span>
-      <span class="splash-sep">·</span>
-      <span class="splash-fa">ایران</span>
     </div>
   </div>
 </div>
@@ -42,8 +47,7 @@
 <div class="archive" id="mapArchive">
   <div class="tag">
     OPERATION · <b>IRAN</b><br>
-    DAY 100 · FIELD MAP<br>
-    2026.03.20 — 06.28
+    DAY 100 · FIELD MAP
   </div>
   <div class="right tag">
     <em>THE SAND THAT</em><br>
@@ -65,13 +69,6 @@
 <div class="scene-bg"></div>
 <div class="scene-ground"></div>
 <canvas id="stage"></canvas>
-
-<div class="heartbeat" aria-hidden="true">
-  <svg viewBox="0 0 14 22">
-    <path d="M2,1 L12,1 L12,4 L8,10 L12,16 L12,21 L2,21 L2,16 L6,10 L2,4 Z" fill="none" stroke="#d4a574" stroke-width="0.6"/>
-    <circle class="sand" cx="7" cy="6" r="0.6" fill="#d4a574"/>
-  </svg>
-</div>
 
 <!-- 星图 UI -->
 <div class="map-ui">
@@ -154,5 +151,9 @@
 -->
 <script src="./app.js"></script>
 <script src="./directory.js"></script>
+<!-- 背景音乐 audio 元素（src 由 bgm.js 根据环境动态设置：本地相对路径 / 线上 CDN） -->
+<audio id="bgm-audio" loop preload="auto" playsinline webkit-playsinline x5-playsinline></audio>
+<!-- 背景音乐 + 右下角播放/暂停按钮 -->
+<script src="./bgm.js"></script>
 </body>
 </html>
