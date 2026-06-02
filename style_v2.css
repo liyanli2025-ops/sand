@@ -1,4 +1,4 @@
-/* sand v2.2 mini-card revamp 2026-06-02T20:32 — finale copy v2 */
+/* sand v2.2 mini-card revamp 2026-06-02T20:38 — finale dont-degrade-stage: clip-path + lazy will-change + small text-shadow + 只是把光借出去 */
 /* 方正丝路体 简繁 ExtraBold（subset：45 字符，~11KB）
    仅用于碎片标签 / 「轻触吊灯」等核心标题级文字 */
 @font-face{
@@ -1857,11 +1857,14 @@ body.finale-on #dirOverlay{
   position:absolute;
   inset:0;
   /* 视口容器：内部用 .finale-roll 做 transform 滚动；不再用 overflow-y:auto，
-     避免片尾向上滚动被用户手指误触动。 */
-  overflow:hidden;
+     避免片尾向上滚动被用户手指误触动。
+     —— 关键：用 clip-path 裁剪而非 overflow:hidden，避免强制创建合成层导致
+        下层 #stage 的 sparkle 粒子（5000 颗小光点）走半透明合成路径变糊。 */
+  clip-path:inset(0);
   color:#f3e3c2;
   font-family: "Noto Serif SC", "Songti SC", "STSong", "PingFang SC", serif;
-  text-shadow:0 0 22px rgba(0,0,0,0.85), 0 2px 8px rgba(0,0,0,0.6);
+  /* 阴影模糊半径从 22px 降到 10px，减少全屏 raster 压力，避免拖累 stage 帧率 */
+  text-shadow:0 0 10px rgba(0,0,0,0.85), 0 2px 6px rgba(0,0,0,0.6);
 }
 /* —— 片尾滚动轨道：translateY 缓慢上推，电视剧片尾风格 —— */
 .finale-roll{
@@ -1876,12 +1879,13 @@ body.finale-on #dirOverlay{
   display:flex;
   flex-direction:column;
   align-items:center;
-  /* 默认无滚动；.rolling 时启用 transition 把 translateY(-) --roll-distance */
+  /* 默认无滚动 */
   --roll-distance: 0px;
   --roll-duration: 22s;
-  will-change:transform;
+  /* will-change 只在真正开始滚动时启用，避免爆炸阶段就强制合成层、拖累 stage 渲染 */
 }
 .finale.rolling .finale-roll{
+  will-change:transform;
   transform:translate(-50%, calc(0px - var(--roll-distance, 0px)));
   transition:transform var(--roll-duration, 22s) linear;
 }

@@ -1793,7 +1793,7 @@ function showFinale(){
       +   '<div class="finale-roll">'
       +     '<div class="finale-block finale-block-1">'
       +       '<p>工匠不会问，镜宫会不会永存。</p>'
-      +       '<p class="quiet">他只是光借出去，让镜面接住。</p>'
+      +       '<p class="quiet">他只是把光借出去，让镜面接住。</p>'
       +       '<p class="quiet">十万片镜面碎了，光便分作十万颗星，</p>'
       +       '<p class="quiet">在无边的黑暗里，仍亮着，</p>'
       +       '<p class="quiet">仍是同一束光。</p>'
