@@ -1,4 +1,4 @@
-/* sand v2.2 mini-card revamp 2026-06-02T20:18 — overlay click no longer leaks to raycaster */
+/* sand v2.2 mini-card revamp 2026-06-02T20:22 — finale roll-distance to logo-bottom + arrow no-marker */
 /* 方正丝路体 简繁 ExtraBold（subset：45 字符，~11KB）
    仅用于碎片标签 / 「轻触吊灯」等核心标题级文字 */
 @font-face{
@@ -1878,11 +1878,12 @@ body.finale-on #dirOverlay{
   align-items:center;
   /* 默认无滚动；.rolling 时启用 transition 把 translateY(-) --roll-distance */
   --roll-distance: 0px;
+  --roll-duration: 22s;
   will-change:transform;
 }
 .finale.rolling .finale-roll{
   transform:translate(-50%, calc(0px - var(--roll-distance, 0px)));
-  transition:transform 32s linear;
+  transition:transform var(--roll-duration, 22s) linear;
 }
 .finale-block{
   width:100%; max-width:560px;
@@ -1914,7 +1915,8 @@ body.finale-on #dirOverlay{
   display:flex;
   justify-content:center;
   align-items:center;
-  margin:60px 0 30vh; /* 上方与第三段拉开距离；下方留白让滚到视口中央能停住 */
+  /* 上方与第三段拉开距离；下方留少量呼吸位即可（计算滚动距离时已让 logo 底贴视口底） */
+  margin:60px 0 8vh;
   opacity:0;
   transition:opacity 2s ease 0.6s;
 }
@@ -2008,7 +2010,7 @@ body.finale-on #dirOverlay{
   .finale-block-1{ margin-top:4vh; }
   .finale-block p{ font-size:18px; line-height:1.9; }
   .finale-block p.quiet{ font-size:18px; }
-  .finale-end-logo{ margin:50px 0 26vh; }
+  .finale-end-logo{ margin:50px 0 6vh; }
   .finale-logo-img{ width:84vw; }
   .finale-share-cue{ top:14px; right:14px; }
   .finale-share-arrow{ width:64px; height:48px; }

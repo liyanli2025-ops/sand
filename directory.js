@@ -1820,19 +1820,20 @@ function showFinale(){
       +     '</div>'
       +   '</div>'
       + '</div>'
-      /* —— 右上角"点击分享"指引箭头：滚动到底后才显示 —— */
+      /* —— 右上角"点击分享"指引箭头：滚动到底后才显示 ——
+       * 用整体 viewBox + 单一 path（含箭头头），不用 marker，避免某些 webview/微信内核
+       * 对 SVG fragment id 解析失败导致箭头不显示。 */
       + '<div class="finale-share-cue" aria-hidden="true">'
-      +   '<svg class="finale-share-arrow" viewBox="0 0 80 60">'
-      +     '<defs>'
-      +       '<marker id="finaleArrowHead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
-      +         '<path d="M0,0 L10,5 L0,10 z" fill="rgba(245,204,122,0.9)"/>'
-      +       '</marker>'
-      +     '</defs>'
-      +     /* 一段从左下到右上的弧线，箭头尖端朝向右上"..."所在的位置 */
-      +     '<path d="M10,52 Q40,46 60,18" '
-      +       'stroke="rgba(245,204,122,0.9)" stroke-width="1.4" fill="none" '
-      +       'stroke-linecap="round" stroke-dasharray="3 4" '
-      +       'marker-end="url(#finaleArrowHead)"/>'
+      +   '<svg class="finale-share-arrow" viewBox="0 0 90 70" xmlns="http://www.w3.org/2000/svg">'
+      +     /* 弧线（虚线）：左下 → 右上，停在 (72, 14) */
+      +     '<path d="M8,60 Q34,52 64,20" '
+      +       'stroke="rgba(245,204,122,0.95)" stroke-width="1.6" fill="none" '
+      +       'stroke-linecap="round" stroke-dasharray="3 4"/>'
+      +     /* 箭头头：在弧线终点处画一个朝右上的实心三角，方向沿弧线切线（约 -45°）。
+       *  三个点构成 V 形 + 闭合，保证任何浏览器都正常渲染。 */
+      +     '<path d="M64,20 L54,16 M64,20 L60,30" '
+      +       'stroke="rgba(245,204,122,0.95)" stroke-width="1.8" fill="none" '
+      +       'stroke-linecap="round" stroke-linejoin="round"/>'
       +   '</svg>'
       +   '<div class="finale-share-text">点击右上角 ··· 分享</div>'
       + '</div>';
@@ -1855,33 +1856,38 @@ function showFinale(){
   });
 
   /* —— 13s 第三段开始浮现的同时，启动"片尾向上滚动"——
-   *   滚动距离 = .finale-roll 总高 + 起始 padding，由 CSS 用变量驱动；
-   *   通过 JS 计算实际高度后赋给 --roll-distance，确保不同屏幕都能滚到末尾。 */
+   *   滚动距离精确计算：让 .finale-end-logo 的底边刚好贴到视口底（再留一点呼吸 padding）。
+   *   不再过度滚动 logo 到屏幕中央，避免文字早早冲出顶部。 */
   setTimeout(() => {
     const rollEl = el.querySelector('.finale-roll');
     const contentEl = el.querySelector('.finale-content');
-    if(rollEl && contentEl){
-      // 视口可见高 + 内容总高 → 至少需要把内容顶上去 (rollH - vh*0.35)，
-      // 留 35vh 的"尾留白"让 logo 最终居中可见，不一闪而过冲出屏幕。
+    const logoBox = el.querySelector('.finale-end-logo');
+    if(rollEl && contentEl && logoBox){
       const vh = contentEl.clientHeight;
-      const rollH = rollEl.scrollHeight;
-      // 让 logo 滚到视口竖直中线再略偏上的位置后停住（最终静帧）
-      const distance = Math.max(0, rollH - vh * 0.5);
+      // logo 相对 roll 容器的位置（roll 容器自己有 padding-top，offsetTop 已包含）
+      const logoBottom = logoBox.offsetTop + logoBox.offsetHeight;
+      // 让 logo 底贴视口底，再留 6vh 下方呼吸位（避免太顶）
+      const breathBottom = vh * 0.06;
+      const distance = Math.max(0, logoBottom - vh + breathBottom);
       rollEl.style.setProperty('--roll-distance', distance + 'px');
+
+      /* 持续时长按距离动态算：约 90 像素/秒（比之前 32s 固定要快/慢都自适应屏高），
+       * 最短 14s 防过快，最长 26s 防过慢。 */
+      const speedPxPerSec = 90;
+      const dur = Math.max(14, Math.min(26, distance / speedPxPerSec));
+      rollEl.style.setProperty('--roll-duration', dur.toFixed(2) + 's');
       el.classList.add('rolling');
 
-      /* 滚动持续时长 = 32 秒（缓慢电视片尾感）。
-       * 滚动结束后显示右上角分享指引（动画 transition end 监听）。 */
-      const onRollEnd = (e) => {
-        if(e.target !== rollEl) return;
-        if(e.propertyName !== 'transform') return;
+      const onRollEnd = (ev) => {
+        if(ev.target !== rollEl) return;
+        if(ev.propertyName !== 'transform') return;
         rollEl.removeEventListener('transitionend', onRollEnd);
         el.classList.add('rolled-end');
       };
       rollEl.addEventListener('transitionend', onRollEnd);
 
-      /* 兜底：transitionend 在某些浏览器/被中断时不触发，定时器同步触发 */
-      setTimeout(() => el.classList.add('rolled-end'), 32000 + 200);
+      /* 兜底：transitionend 万一没触发，比时长多 0.5s 后也触发末态 */
+      setTimeout(() => el.classList.add('rolled-end'), dur * 1000 + 500);
     }
   }, 13000);
 
