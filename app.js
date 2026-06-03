@@ -8,39 +8,123 @@ const splashVideo = document.getElementById('splashVideo');
 const splashEnterBtn = document.getElementById('splashEnter');
 let splashDismissed = false;
 
-// 视频就绪后渐入
+/* —— 视频多重兜底播放（参考 flowers 项目，针对微信 X5 内核黑屏问题） ——
+ *   微信里黑屏的根因不是 404，而是 X5 内核对 autoplay 的限制 + canplaythrough 不触发。
+ *   策略：① 立即播 ② loadedmetadata/canplay 时播 ③ WeixinJSBridge 回调时播
+ *        ④ window load 时播 ⑤ 前 3 秒定时重试 ⑥ 首次 touchstart 兜底
+ *   同时 video 默认就显示（不再依赖 .ready class），让 poster/首帧能直接看见。 */
 if(splashVideo){
-  const showVideo = () => { splashVideo.classList.add('ready'); };
-  if(splashVideo.readyState >= 3) showVideo();
-  else splashVideo.addEventListener('canplaythrough', showVideo, { once: true });
-  // 兜底：2 秒后无论如何都显示（低端机可能不触发 canplaythrough）
-  setTimeout(showVideo, 2000);
+  const isWx = /MicroMessenger/i.test(navigator.userAgent);
+  let videoPlayStarted = false;
+  const onVideoPlaying = () => {
+    if(videoPlayStarted) return;
+    videoPlayStarted = true;
+    splashVideo.classList.add('ready'); // 触发渐入透明度
+  };
+  const tryPlayVideo = () => {
+    if(!splashVideo || !splashVideo.paused) return;
+    splashVideo.muted = true;
+    try{
+      const p = splashVideo.play();
+      if(p && p.then) p.then(onVideoPlaying).catch(() => {});
+    }catch(e){}
+  };
+
+  splashVideo.addEventListener('playing', onVideoPlaying);
+  splashVideo.addEventListener('timeupdate', function onTU(){
+    if(splashVideo.currentTime > 0.05){
+      onVideoPlaying();
+      splashVideo.removeEventListener('timeupdate', onTU);
+    }
+  });
+
+  // 1. 立即尝试
+  tryPlayVideo();
+  // 2. 视频就绪后
+  splashVideo.addEventListener('loadedmetadata', tryPlayVideo);
+  splashVideo.addEventListener('canplay', tryPlayVideo);
+  // 3. 微信专用：WeixinJSBridge.getNetworkType 回调触发（官方推荐）
+  if(isWx){
+    const wxAutoPlay = () => {
+      try{ window.WeixinJSBridge.invoke('getNetworkType', {}, tryPlayVideo); }catch(e){}
+    };
+    if(window.WeixinJSBridge) wxAutoPlay();
+    else document.addEventListener('WeixinJSBridgeReady', wxAutoPlay, false);
+  }
+  // 4. 页面加载完
+  window.addEventListener('load', tryPlayVideo);
+  // 5. 定时重试（前 3 秒每 500ms）
+  let retryCount = 0;
+  const retryTimer = setInterval(() => {
+    retryCount++;
+    tryPlayVideo();
+    if(!splashVideo.paused || retryCount >= 6) clearInterval(retryTimer);
+  }, 500);
+  // 6. 首次 touchstart 兜底
+  document.addEventListener('touchstart', function videoTouchPlay(){
+    tryPlayVideo();
+    document.removeEventListener('touchstart', videoTouchPlay);
+  }, { once: true, passive: true });
+  // 7. 兜底渐入：3s 后无论如何都让视频元素可见（避免一直透明）
+  setTimeout(() => splashVideo.classList.add('ready'), 3000);
 }
 
 function dismissSplash(){
   if(splashDismissed) return;
   splashDismissed = true;
+  // —— 埋点：点击「回到现场」按钮（含点击 splash 任意区域进入） ——
+  try{ if(typeof window.__report === 'function') window.__report('enter_btn'); }catch(e){}
 
   // ★★★ 在用户手势栈最顶层、同步调 iOS 陀螺仪权限请求 ★★★
   //    这是 iOS Safari 唯一稳定接受的时机：用户点击的同一个 tick 内、未脱离手势栈、未 await
   //    即使后续 splash 淡出/场景加载都在异步进行也不影响
+  // —— 2026-06-03 修复企业微信陀螺仪不响应：
+  //    iOS 企业微信(wxwork) 的 WKWebView 行为不一致——requestPermission 可能：
+  //      (a) 直接 reject（不弹窗、不返回 state）
+  //      (b) 返回 'denied' 但 deviceorientation 事件实际能收到
+  //      (c) 正常 granted
+  //    无论哪种，都额外直接挂监听作兜底（挂了收不到事件无害；能收到就赚）。
+  var __ua_dismiss = (navigator.userAgent || '');
+  var __isWxWork   = /wxwork/i.test(__ua_dismiss);
+  var __isQQ_dis   = /\bQQ\//i.test(__ua_dismiss) && !/MicroMessenger/i.test(__ua_dismiss);
   if(typeof DeviceOrientationEvent !== 'undefined' &&
      typeof DeviceOrientationEvent.requestPermission === 'function'){
     try{
       DeviceOrientationEvent.requestPermission().then(state => {
-        console.log('[gyro] iOS permission state =', state);
+        console.log('[gyro] iOS permission state =', state, ' wxwork=', __isWxWork);
         if(state === 'granted'){
           window.__gyroPermissionGranted = true;
           // 通知 setupGyro 已经授权，可以挂监听了
           if(typeof window.__gyroAttachListeners === 'function'){
             window.__gyroAttachListeners('splash-granted');
           }
+        } else if(__isWxWork || __isQQ_dis){
+          // 企业微信/QQ：denied 也强挂一次，部分版本 state=denied 但事件仍能收到
+          console.warn('[gyro] wxwork/QQ denied 但仍挂监听兜底');
+          if(typeof window.__gyroAttachListeners === 'function'){
+            window.__gyroAttachListeners('splash-wxwork-fallback-denied');
+          }
         }
       }).catch(err => {
         console.warn('[gyro] iOS requestPermission rejected:', err && err.message);
+        // —— 企业微信/QQ 兜底：reject 也强挂一次
+        if((__isWxWork || __isQQ_dis) && typeof window.__gyroAttachListeners === 'function'){
+          console.warn('[gyro] wxwork/QQ reject 后强挂监听');
+          window.__gyroAttachListeners('splash-wxwork-fallback-reject');
+        }
       });
     }catch(e){
       console.warn('[gyro] iOS requestPermission threw:', e && e.message);
+      // 企业微信/QQ：throw 也强挂
+      if((__isWxWork || __isQQ_dis) && typeof window.__gyroAttachListeners === 'function'){
+        window.__gyroAttachListeners('splash-wxwork-fallback-throw');
+      }
+    }
+  } else {
+    // —— 没有 requestPermission API 的环境（Android 微信/企业微信/QQ、桌面）
+    //    在用户点击的手势里立刻挂一次监听，setupGyro 那边也会挂，重复挂同名事件无害。
+    if(typeof window.__gyroAttachListeners === 'function'){
+      window.__gyroAttachListeners('splash-no-permission-api');
     }
   }
 
@@ -85,6 +169,83 @@ if(splashEl){
     splashEl.addEventListener('click', dismissSplash);
   }, 3000);
 }
+
+/* —— 「继续探索」按钮跳转专用：URL 带 ?skip=... 时自动跳过开屏，直达镜厅
+ *    应用场景：finale 页"继续探索"按钮 reload 时附加：
+ *      - ?skip=fragments → 跳过开屏 + 自动触发吊灯爆裂 + 定格到碎片选择态
+ *        （对齐"从任何子场景关闭后返回"的位置）
+ *      - ?skip=1 → 仅跳过开屏（旧版兼容，进来还是吊灯完整态）
+ *    不影响首次进入（无 query 时仍走完整开屏流程） */
+try{
+  var _skipParam = '';
+  if(window.location && window.location.search){
+    var _qs = window.location.search;
+    if(_qs.indexOf('skip=fragments') !== -1) _skipParam = 'fragments';
+    else if(_qs.indexOf('skip=1') !== -1) _skipParam = '1';
+  }
+  if(_skipParam){
+    // 立即把 splash 设置为隐藏，避免开屏闪现
+    if(splashEl){
+      splashEl.style.transition = 'none';
+      splashEl.style.opacity = '0';
+      splashEl.style.visibility = 'hidden';
+      splashEl.style.pointerEvents = 'none';
+    }
+    // 等 DOM/资源 ready 后调用 dismissSplash 走正常进场流程
+    // 用 rAF 而非 0 延迟，确保 stage canvas 等已挂载
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try{ dismissSplash(); }catch(e){ console.warn('[skip-splash] dismissSplash failed:', e); }
+      });
+    });
+
+    /* —— skip=fragments：进场后自动触发吊灯爆裂，让 collapse 动画走到 0.9s pause 点
+     *    pauseCollapseForDirectory() 会自动把镜厅切到"5 块大碎片可选"目录态 ——
+     *    对应"任何子场景按 × 关闭"返回的位置。
+     *
+     *    时序：dismissSplash → autoEnterGolestan → enterScene(0)
+     *      → 等待 frameGroup（吊灯模型挂入场景）+ shardModelMeshes（碎片 GLB 加载完）
+     *      → 此时 mode=SCENE & sceneState=IDLE & collapseState='idle' → 触发 collapse
+     *      → 0.9s 后 pauseCollapseForDirectory（已有逻辑）→ 用户看到碎片可选态。
+     *
+     *    用 setInterval 轮询，5s 上限兜底，避免任何依赖未就绪导致死锁。 */
+    if(_skipParam === 'fragments'){
+      var _skipFragStart = performance.now();
+      var _skipFragTimer = setInterval(function(){
+        var _elapsed = performance.now() - _skipFragStart;
+        // 5 秒上限：避免模型加载失败时永久轮询
+        if(_elapsed > 5000){
+          clearInterval(_skipFragTimer);
+          console.warn('[skip-fragments] timeout 5s，放弃自动触发 collapse');
+          return;
+        }
+        // 检查所有依赖是否就绪
+        var _mdlG = (typeof MODELS !== 'undefined') ? MODELS.golestan : null;
+        var _ready = _mdlG
+          && _mdlG.frameGroup                    // 吊灯模型已挂进场景
+          && _mdlG.collapseState === 'idle'      // 还没开始爆
+          && (typeof shardModelMeshes !== 'undefined') && shardModelMeshes && shardModelMeshes.scene
+          && (typeof triggerChandelierCollapse === 'function')
+          && (typeof mode !== 'undefined')
+          && (typeof MODE !== 'undefined')
+          && mode === MODE.SCENE;                 // 已完成进场过渡
+        if(_ready){
+          clearInterval(_skipFragTimer);
+          console.log('[skip-fragments] 依赖就绪，自动触发吊灯爆裂（', _elapsed.toFixed(0), 'ms）');
+          try{
+            // 隐藏"轻触吊灯"提示
+            if(typeof pressHintEl !== 'undefined' && pressHintEl){
+              pressHintEl.classList.remove('show');
+            }
+            triggerChandelierCollapse();
+          }catch(err){
+            console.warn('[skip-fragments] triggerChandelierCollapse 失败:', err);
+          }
+        }
+      }, 100);
+    }
+  }
+}catch(e){ console.warn('[skip-splash] check failed:', e); }
 
 const canvas = document.getElementById('stage');
 const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -1401,16 +1562,16 @@ const COORDINATES = [
     subtitleRight2: 'تالار آینه',
     sceneReady: true,
     story: {
-      coord: 'TEHRAN · 35.68°N / 51.42°E',
+      coord: 'TEHRAN · 35.68°N / 51.42°E · 1779–1925',
       day: 'day 1',
       lines: [
-        { text: '两百多年来，这里一直被叫做"镜宫"。', quiet:false },
+        { text: '两百多年来，这里一直被叫做"镜厅"。', quiet:false },
         { text: '直到<strong class="cue">吊灯被击碎</strong>的那一天——', quiet:false },
       ]
     },
     // 灼烧阶段的文案：突出战争带来的、不可修复的遗憾
     collapseStory: {
-      coord: 'TEHRAN · 35.68°N / 51.42°E',
+      coord: 'TEHRAN · 35.68°N / 51.42°E · 1779–1925',
       day: 'day 1',
       lines: [
         { text: '2026 年 3 月 20 日，诺鲁孜节。', quiet:true },
@@ -2687,6 +2848,8 @@ function triggerChandelierCollapse(){
   const mdlG = MODELS.golestan;
   if(mdlG.collapseState !== 'idle') return;
   if(!shardModelMeshes || !shardModelMeshes.scene){ console.warn('[shard] 碎片模型未加载'); return; }
+  // —— 埋点：点击吊灯触发碎裂（点 3D 吊灯 + 点文字"吊灯被击碎"任一入口都会进这里） ——
+  try{ if(typeof window.__report === 'function') window.__report('chandelier_break'); }catch(e){}
 
   // 停止"召唤"呼吸 + 还原灯光基准强度
   _stopChandelierIdlePulse();
@@ -3723,10 +3886,18 @@ function enterScene(idx){
   }
   // 根据屏幕宽高比动态调整 FOV
   if(newPipelineReady){
-    const aspect = window.innerWidth / window.innerHeight;
-    const baseFov = 65;
-    const fov = Math.round(baseFov / Math.max(aspect, 0.4));
-    camera.fov = THREE.MathUtils.clamp(fov, 45, 100);
+    if(isMobile){
+      // 移动端：保持原"竖屏自适应"公式（aspect≈0.46 → ~100°，符合预期）
+      const aspect = window.innerWidth / window.innerHeight;
+      const baseFov = 65;
+      const fov = Math.round(baseFov / Math.max(aspect, 0.4));
+      camera.fov = THREE.MathUtils.clamp(fov, 45, 100);
+    } else {
+      // PC 端：横屏 aspect≈1.78 用原公式会被 clamp 到 45°，全景图被严重放大，
+      // 体感和子场景（DIR_PANO_FOV=100）差异巨大。统一用固定 75° 拉广视角，
+      // 与子全景观感更一致，吊灯主体也不会被推得过近。
+      camera.fov = 75;
+    }
   } else {
     camera.fov = 100;
   }
@@ -3755,6 +3926,9 @@ function enterScene(idx){
 
   if(coord.sceneReady){
     storyEl.querySelector('.story-card-inner').innerHTML = buildStoryHTML(coord.story, coord);
+    /* 绑定"吊灯被击碎"高亮点击 → 等同于点击吊灯触发碎裂
+     * 使用事件委托挂在 .story-card-inner 上，避免每次 innerHTML 重建后丢失监听 */
+    bindCueClickHandler();
     placeholderEl.classList.remove('show');
     if(newPipelineReady){
       // 新管线（吊灯/地毯）：进场立即显示介绍文案
@@ -3805,6 +3979,33 @@ function buildStoryHTML(s, coord, includeHeader){
   }
   s.lines.forEach(l => { html += `<p class="${l.quiet?'quiet':''}">${l.text}</p>`; });
   return html;
+}
+
+/* 让 story-card 里的"吊灯被击碎"金色高亮（.cue）也能点击，等同于点击吊灯。
+ * 使用事件委托一次性挂在 story-card-inner 上，避免 innerHTML 重建丢失监听。
+ * 幂等：重复调用只会绑定一次。 */
+let _cueHandlerBound = false;
+function bindCueClickHandler(){
+  if(_cueHandlerBound) return;
+  if(!storyEl) return;
+  const inner = storyEl.querySelector('.story-card-inner');
+  if(!inner) return;
+  inner.addEventListener('click', (e) => {
+    const cueEl = e.target && (e.target.closest ? e.target.closest('.cue') : null);
+    if(!cueEl) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // 仅在镜厅 idle 阶段允许触发碎裂（避免在崩坏中或别的场景误触）
+    const mdlG = MODELS && MODELS.golestan;
+    if(!mdlG || mdlG.collapseState === 'collapsing' || mdlG.collapseState === 'done') return;
+    if(typeof triggerChandelierCollapse === 'function'){
+      pressHintEl && pressHintEl.classList.remove('show');
+      triggerChandelierCollapse();
+    }
+  }, false);
+  // .cue 元素本身要可点击 + 鼠标手型
+  // 通过 CSS 已在 .story-card .cue 加 cursor:pointer
+  _cueHandlerBound = true;
 }
 
 /* 场景 nextHint（continue →）点击：
@@ -4286,7 +4487,13 @@ function setupGyro(){
   // —— 监听器：优先 deviceorientationabsolute（Android Chrome 上 alpha 是绝对方位，更稳）
   //         备用 deviceorientation（iOS、老 Android）
   let _firstEventLogged = false;
+  let _listenersAttached = false;   // 幂等保护：避免企业微信兜底/dismissSplash/setupGyro 多路调用造成事件翻倍
   function attachListeners(label){
+    if(_listenersAttached){
+      console.log('[gyro] listeners already attached, skip duplicate (label=', label, ')');
+      return;
+    }
+    _listenersAttached = true;
     let absoluteFired = false;
     const onAbs = (e)=>{
       absoluteFired = true;
@@ -5177,10 +5384,16 @@ function onResize(){
   const isGolestan = COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
   const isDirSubScene = (typeof _dirCurrentSceneIdx !== 'undefined') && _dirCurrentSceneIdx >= 0;
   if(mode === MODE.SCENE && isGolestan && !isDirSubScene){
-    const aspect = camera.aspect;
-    const baseFov = 65;
-    const fov = Math.round(baseFov / Math.max(aspect, 0.4));
-    camera.fov = THREE.MathUtils.clamp(fov, 45, 100);
+    if(isMobile){
+      // 移动端：保持原"竖屏自适应"公式
+      const aspect = camera.aspect;
+      const baseFov = 65;
+      const fov = Math.round(baseFov / Math.max(aspect, 0.4));
+      camera.fov = THREE.MathUtils.clamp(fov, 45, 100);
+    } else {
+      // PC 端：固定 75°，避免横屏被 clamp 到 45° 导致全景被严重放大
+      camera.fov = 75;
+    }
   } else if(isDirSubScene && typeof DIR_PANO_FOV !== 'undefined'){
     camera.fov = DIR_PANO_FOV;
   }
