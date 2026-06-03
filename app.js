@@ -4355,27 +4355,15 @@ window.addEventListener('pointerup', (e)=>{
   const totalMove = wasDragging ? Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) : 0;
   dragging = false;
 
-  // 场景 1 新管线：点击吊灯本身才触发崩塌（Raycaster 检测）
+  // 场景 1 新管线：点击屏幕任意位置都可触发吊灯崩塌（区分点击 vs 拖动）
+  // 拖动转视角靠 pointermove 已实时完成，pointerup 只在 totalMove 小于阈值时认为是"点击"
   const isGolestanNew = (mode === MODE.SCENE) &&
     COORDINATES[currentSceneIdx]?.modelId === 'golestan' && MODELS.golestan.frameGroup;
   if(isGolestanNew && totalMove < 12){
     const mdlG = MODELS.golestan;
     if(mdlG.collapseState === 'idle'){
-      // Raycaster 检测是否点击到了吊灯
-      const raycaster = new THREE.Raycaster();
-      const mouse = new THREE.Vector2(
-        (e.clientX / window.innerWidth) * 2 - 1,
-        -(e.clientY / window.innerHeight) * 2 + 1
-      );
-      raycaster.setFromCamera(mouse, camera);
-      // 收集所有吊灯 mesh 做检测
-      const allChandelierMeshes = [];
-      mdlG.frameGroup.traverse(o => { if(o.isMesh) allChandelierMeshes.push(o); });
-      const hits = raycaster.intersectObjects(allChandelierMeshes, false);
-      if(hits.length > 0){
-        pressHintEl.classList.remove('show');
-        triggerChandelierCollapse();
-      }
+      pressHintEl && pressHintEl.classList.remove('show');
+      triggerChandelierCollapse();
     }
   }
 

@@ -2302,7 +2302,7 @@ body.finale-on #dirOverlay{
   .finale-action-line{ width:18px; }
   /* 移动端：尽可能贴顶（安全区下 2px），让微信顶栏下方刚好出现 */
   .finale-share-cue{ top:calc(env(safe-area-inset-top, 0px) + 2px); right:14px; }
-  .finale-share-text{ font-size:12px; letter-spacing:1.2px; }
+  .finale-share-text{ font-size:12px; letter-spacing:0.8px; }
   .finale-title-zh{ font-size:24px; letter-spacing:8px; }
   .finale-title-en{ font-size:18px; letter-spacing:4px; }
 }

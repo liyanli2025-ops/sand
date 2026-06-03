@@ -1902,7 +1902,7 @@ function showFinale(){
        *  改成纯文案 + Unicode 三角符号 ▲ 直接指向右上角 ··· 按钮，最干净最直观。
        *  显示时机：等 logo 出现（.rolled-end）后才渐入。 */
       + '<div class="finale-share-cue" id="finaleShareCue" aria-hidden="true">'
-      +   '<div class="finale-share-text">点击右上角 ··· 分享 ▲</div>'
+      +   '<div class="finale-share-text">点击分享▲</div>'
       + '</div>';
     document.body.appendChild(el);
 
