@@ -584,7 +584,9 @@ loadModelForScene('golestan');
 /* ---------- 渲染器 ---------- */
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:false, alpha:true, powerPreference:'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
+// 第三个参数 false：不覆盖 canvas 的 CSS width/height，让 CSS 控制显示尺寸，
+// 避免 window.innerHeight 在 iOS Safari 里包含底部工具栏高度导致 canvas 溢出出现白边
+renderer.setSize(window.innerWidth, window.innerHeight, false);
 renderer.setClearColor(0x000000, 0);
 
 /* ---------- 后处理：Bloom 辉光（CSS filter 方案） ---------- */
@@ -5377,7 +5379,9 @@ function tick(){
 }
 
 function onResize(){
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  // 第三个参数 false：不覆盖 canvas CSS 尺寸，让 CSS 控制显示，
+  // 避免 window.innerHeight 在 iOS Safari 包含底部工具栏导致 canvas 溢出白边
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
   camera.aspect = window.innerWidth / window.innerHeight;
   // 如果在 golestan 新管线场景，动态调整 FOV
   // 但子场景全景模式下（directory.js 接管 FOV），不要覆盖

@@ -20,7 +20,7 @@
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 html,body{
-  width:100%;height:100%;overflow:hidden;
+  width:100%;height:100%;height:100dvh;overflow:hidden;
   background:#03050a;
   color:var(--ink);
   font-family:'Noto Serif SC','Songti SC','SimSun',serif;
@@ -413,7 +413,7 @@ body.scene-mode .light-shaft{opacity:1;}
 }
 @keyframes shaftBreathe{0%,100%{opacity:.85;}50%{opacity:1;}}
 
-#stage{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;z-index:5;}
+#stage{position:fixed;inset:0;width:100%;height:100%;height:100dvh;display:block;touch-action:none;z-index:5;}
 
 /* ———— 档案栏 ———— */
 /* 顶部 FIELD · TEHRAN / GOLESTAN PALACE / DAY 001 / 100 等信息条
